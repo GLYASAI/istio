@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // CentralControlPlaneOptions holds options common to all subcommands
@@ -38,21 +39,32 @@ type CentralControlPlaneOptions struct {
 
 	// Timeout is how long to wait before giving up on XDS
 	Timeout time.Duration
+
+	// InsecureSkipVerify skips client verification the server's certificate chain and host name.
+	InsecureSkipVerify bool
+
+	// XDSSAN is the expected Subject Alternative Name of the XDS server
+	XDSSAN string
 }
 
 // AttachControlPlaneFlags attaches control-plane flags to a Cobra command.
 // (Currently just --endpoint)
 func (o *CentralControlPlaneOptions) AttachControlPlaneFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVar(&o.Xds, "xds-address", "",
+
+	cmd.PersistentFlags().StringVar(&o.Xds, "xds-address", viper.GetString("XDS-ADDRESS"),
 		"XDS Endpoint")
-	cmd.PersistentFlags().StringVar(&o.CertDir, "cert-dir", "",
+	cmd.PersistentFlags().StringVar(&o.CertDir, "cert-dir", viper.GetString("CERT-DIR"),
 		"XDS Endpoint certificate directory")
 	cmd.PersistentFlags().StringVar(&o.XdsPodLabel, "xds-label", "",
 		"Istiod pod label selector")
-	cmd.PersistentFlags().IntVar(&o.XdsPodPort, "xds-port", 15012,
+	cmd.PersistentFlags().IntVar(&o.XdsPodPort, "xds-port", viper.GetInt("XDS-PORT"),
 		"Istiod pod port")
 	cmd.PersistentFlags().DurationVar(&o.Timeout, "timeout", time.Second*30,
 		"the duration to wait before failing")
+	cmd.PersistentFlags().StringVar(&o.XDSSAN, "authority", viper.GetString("AUTHORITY"),
+		"XDS Subject Alternative Name (for example istiod.istio-system.svc)")
+	cmd.PersistentFlags().BoolVar(&o.InsecureSkipVerify, "insecure", viper.GetBool("INSECURE"),
+		"Skip server certificate and domain verification. (NOT SECURE!)")
 }
 
 // ValidateControlPlaneFlags checks arguments for valid values and combinations

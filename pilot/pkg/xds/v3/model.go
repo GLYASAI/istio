@@ -14,7 +14,9 @@
 
 package v3
 
-import "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+import (
+	"github.com/envoyproxy/go-control-plane/pkg/resource/v3"
+)
 
 const (
 	ClusterType  = resource.ClusterType
@@ -22,3 +24,19 @@ const (
 	ListenerType = resource.ListenerType
 	RouteType    = resource.RouteType
 )
+
+// GetShortType returns an abbreviated form of a type, useful for logging or human friendly messages
+func GetShortType(typeURL string) string {
+	switch typeURL {
+	case ClusterType:
+		return "CDS"
+	case ListenerType:
+		return "LDS"
+	case RouteType:
+		return "RDS"
+	case EndpointType:
+		return "EDS"
+	default:
+		return typeURL
+	}
+}

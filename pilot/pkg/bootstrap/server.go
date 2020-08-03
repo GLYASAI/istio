@@ -81,7 +81,6 @@ var (
 		plugin.Authn,
 		plugin.Authz,
 		plugin.Health,
-		plugin.Mixer,
 	}
 )
 
@@ -203,17 +202,18 @@ func NewServer(args *PilotArgs) (*Server, error) {
 
 	prometheus.EnableHandlingTimeHistogram()
 
+	s.initMeshConfiguration(args, s.fileWatcher)
+
 	// Apply the arguments to the configuration.
 	if err := s.initKubeClient(args); err != nil {
 		return nil, fmt.Errorf("error initializing kube client: %v", err)
 	}
 
-	s.initMeshConfiguration(args, s.fileWatcher)
 	s.initMeshNetworks(args, s.fileWatcher)
 	s.initMeshHandlers()
 
 	// Parse and validate Istiod Address.
-	istiodHost, istiodPort, err := e.GetDiscoveryAddress()
+	istiodHost, _, err := e.GetDiscoveryAddress()
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +247,7 @@ func NewServer(args *PilotArgs) (*Server, error) {
 	}
 
 	// Secure gRPC Server must be initialized after CA is created as may use a Citadel generated cert.
-	if err := s.initSecureDiscoveryService(args, istiodPort); err != nil {
+	if err := s.initSecureDiscoveryService(args); err != nil {
 		return nil, fmt.Errorf("error initializing secure gRPC Listener: %v", err)
 	}
 
@@ -304,6 +304,10 @@ func NewServer(args *PilotArgs) (*Server, error) {
 		})
 	}
 
+	s.addReadinessProbe("discovery", func() (bool, error) {
+		return s.EnvoyXdsServer.IsServerReady(), nil
+	})
+
 	return s, nil
 }
 
@@ -321,7 +325,7 @@ func getClusterID(args *PilotArgs) string {
 // If Port == 0, a port number is automatically chosen. Content serving is started by this method,
 // but is executed asynchronously. Serving can be canceled at any time by closing the provided stop channel.
 func (s *Server) Start(stop <-chan struct{}) error {
-	log.Infof("Staring Istiod Server with primary cluster %s", s.clusterID)
+	log.Infof("Starting Istiod Server with primary cluster %s", s.clusterID)
 
 	// Now start all of the components.
 	for _, fn := range s.startFuncs {
@@ -355,10 +359,9 @@ func (s *Server) Start(stop <-chan struct{}) error {
 		return fmt.Errorf("failed to sync cache")
 	}
 
-	// Trigger a push, so that the global push context is updated with the new config and Pilot's local Envoy
-	// also is updated with new config.
-	log.Infof("All caches have been synced up, triggering a push")
-	s.EnvoyXdsServer.Push(&model.PushRequest{Full: true})
+	// Inform Discovery Server so that it can start accepting connections.
+	log.Infof("All caches have been synced up, marking server ready")
+	s.EnvoyXdsServer.CachesSynced()
 
 	// At this point we are ready - start Http Listener so that it can respond to readiness events.
 	go func() {
@@ -389,13 +392,28 @@ func (s *Server) WaitUntilCompletion() {
 }
 
 // initKubeClient creates the k8s client if running in an k8s environment.
+// This is determined by the presence of a kube registry, which
+// uses in-context k8s, or a config source of type k8s.
 func (s *Server) initKubeClient(args *PilotArgs) error {
-	if hasKubeRegistry(args.RegistryOptions.Registries) {
+	hasK8SConfigStore := false
+	if args.RegistryOptions.FileDir == "" {
+		// If file dir is set - config controller will just use file.
+		meshConfig := s.environment.Mesh()
+		if meshConfig != nil && len(meshConfig.ConfigSources) > 0 {
+			for _, cs := range meshConfig.ConfigSources {
+				if cs.Address == "k8s://" {
+					hasK8SConfigStore = true
+				}
+			}
+		}
+	}
+
+	if hasK8SConfigStore || hasKubeRegistry(args.RegistryOptions.Registries) {
 		var err error
 		// Used by validation
 		s.kubeRestConfig, err = kubelib.DefaultRestConfig(args.RegistryOptions.KubeConfig, "", func(config *rest.Config) {
-			config.QPS = 20
-			config.Burst = 40
+			config.QPS = args.RegistryOptions.KubeOptions.KubernetesAPIQPS
+			config.Burst = args.RegistryOptions.KubeOptions.KubernetesAPIBurst
 		})
 		if err != nil {
 			return fmt.Errorf("failed creating kube config: %v", err)
@@ -578,7 +596,7 @@ func (s *Server) initDNSTLSListener(dns string, tlsOptions TLSOptions) error {
 }
 
 // initialize secureGRPCServer.
-func (s *Server) initSecureDiscoveryService(args *PilotArgs, port string) error {
+func (s *Server) initSecureDiscoveryService(args *PilotArgs) error {
 	if s.peerCertVerifier == nil {
 		// Running locally without configured certs - no TLS mode
 		log.Warnf("The secure discovery service is disabled")
@@ -603,10 +621,9 @@ func (s *Server) initSecureDiscoveryService(args *PilotArgs, port string) error 
 
 	// Default is 15012 - istio-agent relies on this as a default to distinguish what cert auth to expect.
 	// TODO(ramaraochavali): clean up istio-agent startup to remove the dependency of "15012" port.
-	secureGrpc := fmt.Sprintf(":%s", port)
 
 	// create secure grpc listener
-	l, err := net.Listen("tcp", secureGrpc)
+	l, err := net.Listen("tcp", args.ServerOptions.SecureGRPCAddr)
 	if err != nil {
 		return err
 	}
@@ -688,19 +705,22 @@ func (s *Server) addTerminatingStartFunc(fn startFunc) {
 }
 
 func (s *Server) waitForCacheSync(stop <-chan struct{}) bool {
-	if !cache.WaitForCacheSync(stop, func() bool {
-		if !s.ServiceController().HasSynced() {
-			return false
-		}
-		if !s.configController.HasSynced() {
-			return false
-		}
-		return true
-	}) {
+	if !cache.WaitForCacheSync(stop, s.cachesSynced) {
 		log.Errorf("Failed waiting for cache sync")
 		return false
 	}
 
+	return true
+}
+
+// cachesSynced checks whether caches have been synced.
+func (s *Server) cachesSynced() bool {
+	if !s.ServiceController().HasSynced() {
+		return false
+	}
+	if !s.configController.HasSynced() {
+		return false
+	}
 	return true
 }
 
@@ -725,7 +745,7 @@ func (s *Server) initRegistryEventHandlers() error {
 	}
 
 	instanceHandler := func(si *model.ServiceInstance, _ model.Event) {
-		// TODO: This is an incomplete code. This code path is called for consul, etc.
+		// TODO: This is an incomplete code. This code path is called for legacy MCP, etc.
 		// In all cases, this is simply an instance update and not a config update. So, we need to update
 		// EDS in all proxies, and do a full config push for the instance that just changed (add/update only).
 		s.EnvoyXdsServer.ConfigUpdate(&model.PushRequest{
@@ -982,15 +1002,14 @@ func (s *Server) initControllers(args *PilotArgs) error {
 // initNamespaceController initializes namespace controller to sync config map.
 func (s *Server) initNamespaceController(args *PilotArgs) {
 	if s.CA != nil && s.kubeClient != nil {
+		// create namespace controller
+		nsController := kubecontroller.NewNamespaceController(s.fetchCARoot, s.kubeClient)
 		s.addTerminatingStartFunc(func(stop <-chan struct{}) error {
-			leaderelection.
-				NewLeaderElection(args.Namespace, args.PodName, leaderelection.NamespaceController, s.kubeClient).
-				AddRunFunction(func(stop <-chan struct{}) {
-					log.Infof("Starting namespace controller")
-					nc := kubecontroller.NewNamespaceController(s.fetchCARoot, args.RegistryOptions.KubeOptions, s.kubeClient)
-					nc.Run(stop)
-				}).
-				Run(stop)
+			le := leaderelection.NewLeaderElection(args.Namespace, args.PodName, leaderelection.NamespaceController, s.kubeClient.Kube())
+			le.AddRunFunction(func(leaderStop <-chan struct{}) {
+				nsController.Run(leaderStop)
+			})
+			le.Run(stop)
 			return nil
 		})
 	}

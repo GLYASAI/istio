@@ -116,8 +116,8 @@ func init() {
 	// Process commandline args.
 	discoveryCmd.PersistentFlags().StringSliceVar(&serverArgs.RegistryOptions.Registries, "registries",
 		[]string{string(serviceregistry.Kubernetes)},
-		fmt.Sprintf("Comma separated list of platform service registries to read from (choose one or more from {%s, %s, %s})",
-			serviceregistry.Kubernetes, serviceregistry.Consul, serviceregistry.Mock))
+		fmt.Sprintf("Comma separated list of platform service registries to read from (choose one or more from {%s, %s})",
+			serviceregistry.Kubernetes, serviceregistry.Mock))
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.ClusterRegistriesNamespace, "clusterRegistriesNamespace",
 		serverArgs.RegistryOptions.ClusterRegistriesNamespace, "Namespace for ConfigMap which stores clusters configs")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeConfig, "kubeconfig", "",
@@ -152,8 +152,6 @@ func init() {
 		"The ID of the cluster that this Istiod instance resides")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.KubeOptions.TrustDomain, "trust-domain", "",
 		"The domain serves to identify the system with spiffe")
-	discoveryCmd.PersistentFlags().StringVar(&serverArgs.RegistryOptions.ConsulServerAddr, "consulserverURL", "",
-		"URL for the Consul server")
 
 	// using address, so it can be configured as localhost:.. (possibly UDS in future)
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.HTTPAddr, "httpAddr", ":8080",
@@ -162,6 +160,8 @@ func init() {
 		"Injection and validation service HTTPS address")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.GRPCAddr, "grpcAddr", ":15010",
 		"Discovery service gRPC address")
+	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.SecureGRPCAddr, "secureGRPCAddr", ":15012",
+		"Discovery service secured gRPC address")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.MonitoringAddr, "monitoringAddr", ":15014",
 		"HTTP address to use for pilot's self-monitoring information")
 	discoveryCmd.PersistentFlags().BoolVar(&serverArgs.ServerOptions.EnableProfiling, "profile", true,
@@ -174,6 +174,12 @@ func init() {
 		"File containing the x509 Server Certificate")
 	discoveryCmd.PersistentFlags().StringVar(&serverArgs.ServerOptions.TLSOptions.KeyFile, "tlsKeyFile", "",
 		"File containing the x509 private key matching --tlsCertFile")
+
+	discoveryCmd.PersistentFlags().Float32Var(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIQPS, "kubernetesApiQPS", 20.0,
+		"Maximum QPS when communicating with the kubernetes API")
+
+	discoveryCmd.PersistentFlags().IntVar(&serverArgs.RegistryOptions.KubeOptions.KubernetesAPIBurst, "kubernetesApiBurst", 40,
+		"Maximum burst for throttle when communicating with the kubernetes API")
 
 	// Attach the Istio logging options to the command.
 	loggingOptions.AttachCobraFlags(rootCmd)

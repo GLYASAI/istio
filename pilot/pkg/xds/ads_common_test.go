@@ -31,7 +31,9 @@ func TestProxyNeedsPush(t *testing.T) {
 		svcName     = "svc1.com"
 		drName      = "dr1"
 		vsName      = "vs1"
+		scName      = "sc1"
 		nsName      = "ns1"
+		nsRoot      = "rootns"
 		generalName = "name1"
 
 		invalidNameSuffix = "invalid"
@@ -44,9 +46,14 @@ func TestProxyNeedsPush(t *testing.T) {
 		want    bool
 	}
 
+	proxyCfg := &model.Config{ConfigMeta: model.ConfigMeta{
+		Name:      generalName,
+		Namespace: nsName,
+	}}
+
 	sidecar := &model.Proxy{
 		Type: model.SidecarProxy, IPAddresses: []string{"127.0.0.1"}, Metadata: &model.NodeMetadata{},
-		SidecarScope: &model.SidecarScope{}}
+		SidecarScope: &model.SidecarScope{Config: proxyCfg, RootNamespace: nsRoot}}
 	gateway := &model.Proxy{Type: model.Router}
 
 	sidecarScopeKindNames := map[resource.GroupVersionKind]string{
@@ -76,14 +83,10 @@ func TestProxyNeedsPush(t *testing.T) {
 			{
 				Kind: gvk.Gateway,
 				Name: generalName, Namespace: nsName}: {}}, true},
-		{"quotaspec config for sidecar", sidecar, map[model.ConfigKey]struct{}{
+		{"sidecar config for gateway", gateway, map[model.ConfigKey]struct{}{
 			{
-				Kind: gvk.QuotaSpec,
-				Name: generalName, Namespace: nsName}: {}}, true},
-		{"quotaspec config for gateway", gateway, map[model.ConfigKey]struct{}{
-			{
-				Kind: gvk.QuotaSpec,
-				Name: generalName, Namespace: nsName}: {}}, false},
+				Kind: gvk.Sidecar,
+				Name: scName, Namespace: nsName}: {}}, false},
 		{"invalid config for sidecar", sidecar, map[model.ConfigKey]struct{}{
 			{
 				Kind: resource.GroupVersionKind{Kind: invalidKind}, Name: generalName, Namespace: nsName}: {}},
@@ -111,6 +114,26 @@ func TestProxyNeedsPush(t *testing.T) {
 			configs: map[model.ConfigKey]struct{}{{Kind: kind, Name: name + invalidNameSuffix, Namespace: nsName}: {}},
 			want:    false,
 		})
+	}
+
+	sidecarNamespaceScopeTypes := []resource.GroupVersionKind{
+		gvk.Sidecar, gvk.EnvoyFilter, gvk.AuthorizationPolicy, gvk.RequestAuthentication,
+	}
+	for _, kind := range sidecarNamespaceScopeTypes {
+		cases = append(cases,
+			Case{
+				name:    fmt.Sprintf("%s config for sidecar in same namespace", kind.Kind),
+				proxy:   sidecar,
+				configs: map[model.ConfigKey]struct{}{{Kind: kind, Name: generalName, Namespace: nsName}: {}},
+				want:    true,
+			},
+			Case{
+				name:    fmt.Sprintf("%s config for sidecar in different namespace", kind.Kind),
+				proxy:   sidecar,
+				configs: map[model.ConfigKey]struct{}{{Kind: kind, Name: generalName, Namespace: "invalid-namespace"}: {}},
+				want:    false,
+			},
+		)
 	}
 
 	// tests for kind-affect-proxy.
@@ -173,18 +196,6 @@ func TestPushTypeFor(t *testing.T) {
 			name:        "sidecar updated for gateway proxy",
 			proxy:       gateway,
 			configTypes: []resource.GroupVersionKind{gvk.Sidecar},
-			expect:      map[Type]bool{},
-		},
-		{
-			name:        "quotaSpec updated for sidecar proxy",
-			proxy:       sidecar,
-			configTypes: []resource.GroupVersionKind{gvk.QuotaSpec},
-			expect:      map[Type]bool{LDS: true, RDS: true},
-		},
-		{
-			name:        "quotaSpec updated for gateway",
-			proxy:       gateway,
-			configTypes: []resource.GroupVersionKind{gvk.QuotaSpec},
 			expect:      map[Type]bool{},
 		},
 		{

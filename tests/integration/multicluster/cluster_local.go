@@ -22,16 +22,15 @@ import (
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
 	"istio.io/istio/pkg/test/framework/components/namespace"
-	"istio.io/istio/pkg/test/framework/components/pilot"
 	"istio.io/istio/pkg/test/framework/features"
 	"istio.io/istio/pkg/test/framework/label"
 )
 
 // ClusterLocalTest tests that traffic works within a local cluster while in a multicluster configuration
 // clusterLocalNS have been configured in meshConfig.serviceSettings to be clusterLocal.
-func ClusterLocalTest(t *testing.T, clusterLocalNS namespace.Instance, pilots []pilot.Instance, feature features.Feature) {
+func ClusterLocalTest(t *testing.T, clusterLocalNS namespace.Instance, features ...features.Feature) {
 	framework.NewTest(t).
-		Features(feature).
+		Features(features...).
 		Run(func(ctx framework.TestContext) {
 			ctx.NewSubTest("respect-cluster-local-config").Run(func(ctx framework.TestContext) {
 				clusters := ctx.Environment().Clusters()
@@ -45,15 +44,15 @@ func ClusterLocalTest(t *testing.T, clusterLocalNS namespace.Instance, pilots []
 							// Deploy src only in local, but dst in all clusters. dst in remote clusters shouldn't be hit
 							srcName, dstName := fmt.Sprintf("src-%d", i), fmt.Sprintf("dst-%d", i)
 							var src, dst echo.Instance
-							builder := echoboot.NewBuilderOrFail(ctx, ctx).
-								With(&src, newEchoConfig(srcName, clusterLocalNS, local, pilots)).
-								With(&dst, newEchoConfig(dstName, clusterLocalNS, local, pilots))
+							builder := echoboot.NewBuilder(ctx).
+								With(&src, newEchoConfig(srcName, clusterLocalNS, local)).
+								With(&dst, newEchoConfig(dstName, clusterLocalNS, local))
 							for j, remoteCluster := range clusters {
 								if i == j {
 									continue
 								}
 								var ref echo.Instance
-								builder = builder.With(&ref, newEchoConfig(dstName, clusterLocalNS, remoteCluster, pilots))
+								builder = builder.With(&ref, newEchoConfig(dstName, clusterLocalNS, remoteCluster))
 							}
 							builder.BuildOrFail(ctx)
 

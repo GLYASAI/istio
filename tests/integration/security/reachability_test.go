@@ -36,7 +36,7 @@ func TestReachability(t *testing.T) {
 	framework.NewTest(t).
 		Run(func(ctx framework.TestContext) {
 
-			rctx := reachability.CreateContext(ctx, p)
+			rctx := reachability.CreateContext(ctx, true)
 			systemNM := namespace.ClaimSystemNamespaceOrFail(ctx, ctx)
 
 			testCases := []reachability.TestCase{
@@ -47,21 +47,23 @@ func TestReachability(t *testing.T) {
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
-						if src == rctx.Naked && opts.Target == rctx.Naked {
+						if rctx.IsNaked(src) && rctx.IsNaked(opts.Target) {
 							// naked->naked should always succeed.
 							return true
 						}
 
 						// If one of the two endpoints is naked, expect failure.
-						return src != rctx.Naked && opts.Target != rctx.Naked
+						return !rctx.IsNaked(src) && !rctx.IsNaked(opts.Target)
 					},
 				},
 				{
 					ConfigFile: "beta-mtls-permissive.yaml",
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
-						// Exclude calls to the naked app.
-						return opts.Target != rctx.Naked
+						// Exclude calls from naked->VM since naked has no Envoy
+						// so k8s is responsible for DNS resolution
+						// However, no endpoint exists for VM in k8s, so calls from naked->VM will fail
+						return !rctx.IsNaked(opts.Target) && !(rctx.IsNaked(src) && opts.Target == rctx.VM)
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
@@ -71,7 +73,8 @@ func TestReachability(t *testing.T) {
 					ConfigFile: "beta-mtls-off.yaml",
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
-						return true
+						// Exclude calls from naked->VM.
+						return !(rctx.IsNaked(src) && opts.Target == rctx.VM)
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						return true
@@ -97,8 +100,13 @@ func TestReachability(t *testing.T) {
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
 						// have proxy neither.
-						if src == rctx.Naked {
-							return opts.Target == rctx.Naked
+						if rctx.IsNaked(src) {
+							return rctx.IsNaked(opts.Target)
+						}
+						// headless service with sidecar injected, global mTLS enabled,
+						// no client side transport socket or transport_socket_matches since it's headless service.
+						if src != rctx.Headless && opts.Target == rctx.Headless {
+							return false
 						}
 						return true
 					},
@@ -112,9 +120,13 @@ func TestReachability(t *testing.T) {
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
 						// autoMtls doesn't work for client that doesn't have proxy, unless target doesn't
 						// have proxy or have mTLS disabled
-						if src == rctx.Naked {
-							return opts.Target == rctx.Naked || (opts.Target == rctx.B && opts.PortName != "http")
+						if rctx.IsNaked(src) {
+							return rctx.IsNaked(opts.Target) || (opts.Target == rctx.B && opts.PortName != "http")
 
+						}
+						// headless with sidecar injected, global mTLS enabled, no client side transport socket or transport_socket_matches since it's headless service.
+						if src != rctx.Headless && opts.Target == rctx.Headless {
+							return false
 						}
 						// PeerAuthentication disable mTLS for workload app:b, except http port. Thus, autoMTLS
 						// will fail on all ports on b, except http port.
@@ -126,7 +138,14 @@ func TestReachability(t *testing.T) {
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Exclude calls to the headless TCP port.
-						if opts.Target == rctx.Headless && opts.PortName == "tcp" {
+						if rctx.IsHeadless(opts.Target) && opts.PortName == "tcp" {
+							return false
+						}
+
+						// Exclude calls from naked->VM since naked has no Envoy
+						// so k8s is responsible for DNS resolution
+						// However, no endpoint exists for VM in k8s, so calls from naked->VM will fail
+						if rctx.IsNaked(src) && opts.Target == rctx.VM {
 							return false
 						}
 

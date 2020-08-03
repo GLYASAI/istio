@@ -41,9 +41,6 @@ type RegistryOptions struct {
 	ClusterRegistriesNamespace string
 	KubeConfig                 string
 
-	// Consul options
-	ConsulServerAddr string
-
 	// DistributionTracking control
 	DistributionCacheRetention time.Duration
 
@@ -90,6 +87,10 @@ type DiscoveryServerOptions struct {
 
 	// Optional TLS configuration
 	TLSOptions TLSOptions
+
+	// The listening address for secured gRPC. If the port in the address is empty or "0" (as in "127.0.0.1:" or "[::1]:0")
+	// a port number is automatically chosen.
+	SecureGRPCAddr string
 }
 
 type InjectionOptions struct {

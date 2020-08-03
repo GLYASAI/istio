@@ -19,23 +19,17 @@ ISTIO_GO := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 export ISTIO_GO
 SHELL := /bin/bash -o pipefail
 
-VERSION ?= 1.7-dev
+VERSION ?= 1.8-dev
 
 # Base version of Istio image to use
-BASE_VERSION ?= 1.7-dev.3
+BASE_VERSION ?= 1.8-dev.0
 
 export GO111MODULE ?= on
 export GOPROXY ?= https://proxy.golang.org
 export GOSUMDB ?= sum.golang.org
 
-ISTIO_CNI_HUB ?= gcr.io/istio-testing
-export ISTIO_CNI_HUB
-ISTIO_CNI_TAG ?= latest
-export ISTIO_CNI_TAG
-
 # cumulatively track the directories/files to delete after a clean
 DIRS_TO_CLEAN:=
-FILES_TO_CLEAN:=
 
 # If GOPATH is not set by the env, set it to a sane value
 GOPATH ?= $(shell cd ${ISTIO_GO}/../../..; pwd)
@@ -275,19 +269,16 @@ buildcache:
 BINARIES:=./istioctl/cmd/istioctl \
   ./pilot/cmd/pilot-discovery \
   ./pilot/cmd/pilot-agent \
-  ./mixer/cmd/mixs \
-  ./mixer/cmd/mixc \
-  ./mixer/tools/mixgen \
-  ./security/tools/sdsclient \
   ./pkg/test/echo/cmd/client \
   ./pkg/test/echo/cmd/server \
-  ./mixer/test/policybackend \
   ./operator/cmd/operator \
-  ./cni/cmd/istio-cni ./cni/cmd/istio-cni-repair \
+  ./cni/cmd/istio-cni \
+  ./cni/cmd/istio-cni-repair \
+  ./cni/cmd/install-cni \
   ./tools/istio-iptables
 
 # List of binaries included in releases
-RELEASE_BINARIES:=pilot-discovery pilot-agent mixc mixs mixgen istioctl sdsclient
+RELEASE_BINARIES:=pilot-discovery pilot-agent istioctl
 
 .PHONY: build
 build: depend ## Builds all go binaries.
@@ -322,7 +313,7 @@ $(foreach bin,$(BINARIES),$(eval $(call build-linux,$(bin))))
 # As an optimization, these still build everything
 $(foreach bin,$(BINARIES),$(shell basename $(bin))): build
 
-MARKDOWN_LINT_WHITELIST=localhost:8080,storage.googleapis.com/istio-artifacts/pilot/,http://ratings.default.svc.cluster.local:9080/ratings
+MARKDOWN_LINT_ALLOWLIST=localhost:8080,storage.googleapis.com/istio-artifacts/pilot/,http://ratings.default.svc.cluster.local:9080/ratings
 
 lint-helm-global:
 	find manifests -name 'Chart.yaml' -print0 | ${XARGS} -L 1 dirname | xargs -r helm lint --strict -f manifests/charts/global.yaml
@@ -330,13 +321,11 @@ lint-helm-global:
 
 lint: lint-python lint-copyright-banner lint-scripts lint-go lint-dockerfiles lint-markdown lint-yaml lint-licenses lint-helm-global ## Runs all linters.
 	@bin/check_samples.sh
-	@go run mixer/tools/adapterlinter/main.go ./mixer/adapter/...
 	@testlinter
-	@envvarlinter galley istioctl mixer pilot security
+	@envvarlinter galley istioctl pilot security
 
 go-gen:
 	@mkdir -p /tmp/bin
-	@go build -o /tmp/bin/mixgen "${REPO_ROOT}/mixer/tools/mixgen/main.go"
 	@PATH="${PATH}":/tmp/bin go generate ./...
 
 gen-charts:
@@ -349,7 +338,7 @@ refresh-goldens:
 
 update-golden: refresh-goldens
 
-gen: go-gen mirror-licenses format update-crds operator-proto sync-configs-from-istiod gen-kustomize update-golden ## Update all generated code.
+gen: mod-download-go go-gen mirror-licenses format update-crds operator-proto sync-configs-from-istiod gen-kustomize update-golden ## Update all generated code.
 
 check-no-modify:
 	@bin/check_no_modify.sh
@@ -360,6 +349,9 @@ gen-check: check-no-modify gen check-clean-repo
 sync-configs-from-istiod:
 	cp manifests/charts/istio-control/istio-discovery/files/injection-template.yaml manifests/charts/istiod-remote/files/
 	cp manifests/charts/istio-control/istio-discovery/templates/istiod-injector-configmap.yaml manifests/charts/istiod-remote/templates/
+	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.6.yaml manifests/charts/istiod-remote/templates/
+	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.7.yaml manifests/charts/istiod-remote/templates/
+	cp manifests/charts/istio-control/istio-discovery/templates/telemetryv2_1.8.yaml manifests/charts/istiod-remote/templates/
 
 # Generate kustomize templates.
 gen-kustomize:
@@ -430,132 +422,27 @@ ${ISTIO_BIN}/go-junit-report:
 	@echo "go-junit-report not found. Installing it now..."
 	unset GOOS && unset GOARCH && CGO_ENABLED=1 go get -u github.com/jstemmer/go-junit-report
 
-with_junit_report: | $(JUNIT_REPORT)
-	$(MAKE) -e $(TARGET) 2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
+# This is just an alias for racetest now
+test: racetest
 
-# Run coverage tests
-ifeq ($(WHAT),)
-       TEST_OBJ = common-test pilot-test mixer-test security-test galley-test istioctl-test operator-test cni-test
-else
-       TEST_OBJ = selected-pkg-test
-endif
-test: | $(JUNIT_REPORT)
-	KUBECONFIG="$${KUBECONFIG:-$${REPO_ROOT}/tests/util/kubeconfig}" \
-	$(MAKE) -e -f Makefile.core.mk --keep-going $(TEST_OBJ) \
-	2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
-
-# TODO: remove the racetest targets and just have *-test targets that call race
-
-.PHONY: pilot-test
-pilot-test: pilot-racetest
-
-.PHONY: istioctl-test
-istioctl-test: istioctl-racetest
-
-.PHONY: operator-test
-operator-test:
-	go test ${GOBUILDFLAGS} ${T} ./operator/...
-
-.PHONY: mixer-test
-mixer-test: mixer-racetest
-
-.PHONY: galley-test
-galley-test: galley-racetest
-
-.PHONY: security-test
-security-test: security-racetest
-
-.PHONY: cni-test cni.cmd-test cni.install-test
-cni-test: cni.cmd-test cni.install-test
-cni.cmd-test:
-	go test ${GOBUILDFLAGS} ${T} ./cni/cmd/...
-# May want to make this depend on push but it will always push at the moment:  install-test: docker.push
-cni.install-test: docker.install-cni
-	HUB=${HUB} TAG=${TAG} go test ${GOBUILDFLAGS} ${T} ./cni/test/...
-
-.PHONY: common-test
-common-test: common-racetest
-
-.PHONY: selected-pkg-test
-selected-pkg-test:
-	find ${WHAT} -name "*_test.go" | xargs -I {} dirname {} | uniq | xargs -I {} go test ${GOBUILDFLAGS} ${T} -race ./{}
-
-#-----------------------------------------------------------------------------
-# Target: coverage
-#-----------------------------------------------------------------------------
-
-.PHONY: coverage
-
-# Run coverage tests
-coverage: pilot-coverage mixer-coverage security-coverage galley-coverage common-coverage istioctl-coverage
-
-coverage-diff:
-	./bin/codecov_diff.sh
-
-.PHONY: pilot-coverage
-pilot-coverage:
-	bin/codecov.sh pilot
-
-.PHONY: istioctl-coverage
-istioctl-coverage:
-	bin/codecov.sh istioctl
-
-.PHONY: mixer-coverage
-mixer-coverage:
-	bin/codecov.sh mixer
-
-.PHONY: galley-coverage
-galley-coverage:
-	bin/codecov.sh galley
-
-.PHONY: security-coverage
-security-coverage:
-	bin/codecov.sh security/pkg
-	bin/codecov.sh security/cmd
-
-.PHONY: common-coverage
-common-coverage:
-	bin/codecov.sh pkg
-
-#-----------------------------------------------------------------------------
-# Target: go test -race
-#-----------------------------------------------------------------------------
+TEST_TARGETS ?= ./pilot/... ./istioctl/... ./operator/... ./galley/... ./security/... ./pkg/... ./tests/common/... ./tools/istio-iptables/... ./cni/cmd/... ./cni/pkg/...
+# For now, keep a minimal subset. This can be expanded in the future.
+BENCH_TARGETS ?= ./pilot/...
 
 .PHONY: racetest
-
-RACE_TESTS ?= pilot-racetest mixer-racetest security-racetest galley-test common-racetest istioctl-racetest operator-racetest
-
 racetest: $(JUNIT_REPORT) ## Runs all unit tests with race detection enabled
-	$(MAKE) -e -f Makefile.core.mk --keep-going $(RACE_TESTS) \
-	2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
+	go test ${GOBUILDFLAGS} ${T} -race $(TEST_TARGETS) 2>&1 | tee >($(JUNIT_REPORT) > $(JUNIT_OUT))
 
-.PHONY: pilot-racetest
-pilot-racetest:
-	go test ${GOBUILDFLAGS} ${T} -race ./pilot/...
+.PHONY: benchtest
+benchtest: $(JUNIT_REPORT) ## Runs all benchmarks
+	prow/benchtest.sh run $(BENCH_TARGETS)
+	prow/benchtest.sh compare
 
-.PHONY: istioctl-racetest
-istioctl-racetest:
-	go test ${GOBUILDFLAGS} ${T} -race ./istioctl/...
+report-benchtest:
+	prow/benchtest.sh report
 
-.PHONY: operator-racetest
-operator-racetest:
-	RACE_TEST=true go test ${GOBUILDFLAGS} ${T} -race ./operator/...
-
-.PHONY: mixer-racetest
-mixer-racetest:
-	go test ${GOBUILDFLAGS} ${T} -race ./mixer/...
-
-.PHONY: galley-racetest
-galley-racetest:
-	go test ${GOBUILDFLAGS} ${T} -race ./galley/...
-
-.PHONY: security-racetest
-security-racetest:
-	go test ${GOBUILDFLAGS} ${T} -race ./security/pkg/... ./security/cmd/...
-
-.PHONY: common-racetest
-common-racetest: ${BUILD_DEPS}
-	go test ${GOBUILDFLAGS} ${T} -race ./pkg/... ./tests/common/... ./tools/istio-iptables/...
+cni.install-test: docker.install-cni
+	HUB=${HUB} TAG=${TAG} go test ${GOBUILDFLAGS} -count=1 ${T} ./cni/test/...
 
 #-----------------------------------------------------------------------------
 # Target: clean
@@ -564,7 +451,6 @@ common-racetest: ${BUILD_DEPS}
 
 clean: ## Cleans all the intermediate files and folders previously generated.
 	rm -rf $(DIRS_TO_CLEAN)
-	rm -f $(FILES_TO_CLEAN)
 
 #-----------------------------------------------------------------------------
 # Target: docker
@@ -575,9 +461,6 @@ clean: ## Cleans all the intermediate files and folders previously generated.
 include tools/istio-docker.mk
 
 push: docker.push ## Build and push docker images to registry defined by $HUB and $TAG
-
-FILES_TO_CLEAN+=install/consul/istio.yaml \
-                samples/bookinfo/platform/consul/bookinfo.sidecars.yaml
 
 #-----------------------------------------------------------------------------
 # Target: environment and tools

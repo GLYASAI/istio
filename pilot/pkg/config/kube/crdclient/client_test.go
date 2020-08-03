@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	apiextensionv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 
@@ -36,7 +36,7 @@ import (
 func makeClient(t *testing.T, schemas collection.Schemas) model.ConfigStoreCache {
 	fake := kube.NewFakeClient()
 	for _, s := range schemas.All() {
-		fake.Ext().ApiextensionsV1beta1().CustomResourceDefinitions().Create(context.TODO(), &v1beta1.CustomResourceDefinition{
+		fake.Ext().ApiextensionsV1().CustomResourceDefinitions().Create(context.TODO(), &apiextensionv1.CustomResourceDefinition{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("%s.%s", s.Resource().Plural(), s.Resource().Group()),
 			},
@@ -84,12 +84,21 @@ func TestClientNoCRDs(t *testing.T) {
 		t.Fatalf("Create => got %v", err)
 	}
 	retry.UntilSuccessOrFail(t, func() error {
-		l, err := store.List(r.GroupVersionKind(), "ns")
-		if err == nil {
-			return fmt.Errorf("expected error, but got none")
+		l, err := store.List(r.GroupVersionKind(), configMeta.Namespace)
+		// List should actually not return an error in this case; this allows running with missing CRDs
+		// Instead, we just return an empty list.
+		if err != nil {
+			return fmt.Errorf("expected no error, but got %v", err)
 		}
 		if len(l) != 0 {
 			return fmt.Errorf("expected no items returned for unknown CRD")
+		}
+		return nil
+	}, retry.Timeout(time.Second*5), retry.Converge(5))
+	retry.UntilSuccessOrFail(t, func() error {
+		l := store.Get(r.GroupVersionKind(), configMeta.Name, configMeta.Namespace)
+		if l != nil {
+			return fmt.Errorf("expected no items returned for unknown CRD, got %v", l)
 		}
 		return nil
 	}, retry.Timeout(time.Second*5), retry.Converge(5))

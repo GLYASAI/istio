@@ -21,14 +21,14 @@ import (
 
 	"github.com/golang/protobuf/proto"
 
+	mesh "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/istio/security/pkg/nodeagent/cache"
-	secretmodel "istio.io/istio/security/pkg/nodeagent/model"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/xds"
-	v2 "istio.io/istio/pilot/pkg/xds/v2"
 	v3 "istio.io/istio/pilot/pkg/xds/v3"
+	istioagent "istio.io/istio/pkg/istio-agent"
+	"istio.io/istio/pkg/security"
 
 	"istio.io/istio/pkg/adsc"
 	"istio.io/istio/pkg/config/host"
@@ -38,9 +38,7 @@ import (
 
 	"istio.io/istio/tests/util"
 
-	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
-	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 )
 
 const (
@@ -49,15 +47,15 @@ const (
 )
 
 type clientSecrets struct {
-	secretmodel.SecretItem
+	security.SecretItem
 }
 
-func (sc *clientSecrets) GenerateSecret(ctx context.Context, connectionID, resourceName, token string) (*secretmodel.SecretItem, error) {
+func (sc *clientSecrets) GenerateSecret(ctx context.Context, connectionID, resourceName, token string) (*security.SecretItem, error) {
 	return &sc.SecretItem, nil
 }
 
-// ShouldWaitForIngressGatewaySecret indicates whether a valid ingress gateway secret is expected.
-func (sc *clientSecrets) ShouldWaitForIngressGatewaySecret(connectionID, resourceName, token string, fileMountedCertsOnly bool) bool {
+// ShouldWaitForGatewaySecret indicates whether a valid gateway secret is expected.
+func (sc *clientSecrets) ShouldWaitForGatewaySecret(connectionID, resourceName, token string, fileMountedCertsOnly bool) bool {
 	return false
 }
 
@@ -84,12 +82,55 @@ func TestAgent(t *testing.T) {
 	}
 
 	creds := &clientSecrets{
-		secretmodel.SecretItem{
+		security.SecretItem{
 			PrivateKey:       key,
 			CertificateChain: cert,
 			RootCert:         bs.CA.GetCAKeyCertBundle().GetRootCertPem(),
 		},
 	}
+
+	t.Run("agentProxy", func(t *testing.T) {
+		// Start the istio-agent (proxy and SDS part) - will connect to XDS
+		sa := istioagent.NewAgent(&mesh.ProxyConfig{
+			DiscoveryAddress:       util.MockPilotSGrpcAddr,
+			ControlPlaneAuthPolicy: mesh.AuthenticationPolicy_MUTUAL_TLS,
+		}, &istioagent.AgentConfig{
+			// Enable proxy - off by default, will be XDS_LOCAL env in install.
+			LocalXDSAddr: "127.0.0.1:15002",
+		}, &security.Options{
+			PilotCertProvider: "custom",
+			ClusterID:         "kubernetes",
+		})
+
+		// Override agent auth - start will use this instead of a gRPC
+		// TODO: add a test for cert-based config.
+		// TODO: add a test for JWT-based ( using some mock OIDC in Istiod)
+		sa.WorkloadSecrets = creds
+		_, err = sa.Start(true, "test")
+
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// connect to the local XDS proxy - it's using a transient port.
+		ldsr, err := adsc.Dial(sa.LocalXDSListener.Addr().String(), "",
+			&adsc.Config{
+				IP:        "10.11.10.1",
+				Namespace: "test",
+				Watch: []string{
+					v3.ClusterType,
+					collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
+			})
+		if err != nil {
+			t.Fatal("Failed to connect", err)
+		}
+		defer ldsr.Close()
+
+		_, err = ldsr.WaitVersion(5*time.Second, collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
 
 	t.Run("adscTLSDirect", func(t *testing.T) {
 		testAdscTLS(t, creds)
@@ -98,7 +139,7 @@ func TestAgent(t *testing.T) {
 }
 
 // testAdscTLS tests that ADSC helper can connect using TLS to Istiod
-func testAdscTLS(t *testing.T, creds cache.SecretManager) {
+func testAdscTLS(t *testing.T, creds security.SecretManager) {
 	// connect to the local XDS proxy - it's using a transient port.
 	ldsr, err := adsc.Dial(util.MockPilotSGrpcAddr, "",
 		&adsc.Config{
@@ -107,6 +148,7 @@ func testAdscTLS(t *testing.T, creds cache.SecretManager) {
 			Secrets:   creds,
 			Watch: []string{
 				v3.ClusterType,
+				xds.TypeURLConnections,
 				collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind().String()},
 		})
 	if err != nil {
@@ -161,6 +203,54 @@ func TestInternalEvents(t *testing.T) {
 
 }
 
+func TestAdsReconnectAfterRestart(t *testing.T) {
+	_, tearDown := initLocalPilotTestEnv(t)
+	defer tearDown()
+	edsstr, cancel, err := connectADS(util.MockPilotGrpcAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil {
+		t.Fatal("Expected EDS response, but go nil")
+	}
+	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
+		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
+	}
+
+	// Close the connection.
+	cancel()
+
+	edsstr, cancel, err = connectADS(util.MockPilotGrpcAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+
+	// Connect with empty resources.
+	err = sendEDSReq([]string{}, sidecarID(app3Ip, "app3"), res.VersionInfo, res.Nonce, edsstr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil {
+		t.Fatal("Expected EDS response, but go nil")
+	}
+	if len(res.Resources) != 0 || res.TypeUrl != v3.EndpointType {
+		t.Fatalf("Expected zero EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
+	}
+}
+
 // Regression for envoy restart and overlapping connections
 func TestAdsReconnectWithNonce(t *testing.T) {
 	_, tearDown := initLocalPilotTestEnv(t)
@@ -169,7 +259,7 @@ func TestAdsReconnectWithNonce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), edsstr)
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,13 +281,18 @@ func TestAdsReconnectWithNonce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), edsstr)
+	err = sendEDSReq([]string{"outbound|1080||service3.default.svc.cluster.local"}, sidecarID(app3Ip, "app3"), "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	res, _ = adsReceive(edsstr, 15*time.Second)
 
-	t.Log("Received ", res)
+	if res == nil {
+		t.Fatal("Expected EDS response, but go nil")
+	}
+	if len(res.Resources) != 1 || res.TypeUrl != v3.EndpointType {
+		t.Fatalf("Expected one EDS resource, but got %v %s resources", len(res.Resources), res.TypeUrl)
+	}
 }
 
 // Regression for envoy restart and overlapping connections
@@ -235,118 +330,17 @@ func TestAdsReconnect(t *testing.T) {
 
 	// event happens
 	xds.AdsPushAll(s.EnvoyXdsServer)
-	// will trigger recompute and push (we may need to make a change once diff is implemented
 
 	m, err := adsReceive(edsstr2, 3*time.Second)
 	if err != nil {
 		t.Fatal("Recv failed", err)
 	}
-	t.Log("Received ", m)
-}
-
-func sendAndReceivev2(t *testing.T, node string, client AdsClientv2, typeURL string, errMsg string) *xdsapi.DiscoveryResponse {
-	if err := sendXdsv2(node, client, typeURL, errMsg); err != nil {
-		t.Fatal(err)
+	if m == nil {
+		t.Fatal("Expected CDS response, but go nil")
 	}
-	res, err := adsReceivev2(client, 15*time.Second)
-	if err != nil {
-		t.Fatal(err)
+	if len(m.Resources) == 0 || m.TypeUrl != v3.ClusterType {
+		t.Fatalf("Expected non zero CDS resources, but got %v %s resources", len(m.Resources), m.TypeUrl)
 	}
-	return res
-}
-
-func sendAndReceive(t *testing.T, node string, client AdsClient, typeURL string, errMsg string) *discovery.DiscoveryResponse {
-	if err := sendXds(node, client, typeURL, errMsg); err != nil {
-		t.Fatal(err)
-	}
-	res, err := adsReceive(client, 15*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return res
-}
-
-// xdsTest runs a given function with a local pilot environment. This is used to test the ADS handling.
-func xdsv2Test(t *testing.T, name string, fn func(t *testing.T, client AdsClientv2)) {
-	t.Run(name, func(t *testing.T) {
-		_, tearDown := initLocalPilotTestEnv(t)
-		defer tearDown()
-
-		client, cancel, err := connectADSv2(util.MockPilotGrpcAddr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cancel()
-		fn(t, client)
-	})
-}
-
-// xdsTest runs a given function with a local pilot environment. This is used to test the ADS handling.
-func xdsTest(t *testing.T, name string, fn func(t *testing.T, client AdsClient)) {
-	t.Run(name, func(t *testing.T) {
-		_, tearDown := initLocalPilotTestEnv(t)
-		defer tearDown()
-
-		client, cancel, err := connectADS(util.MockPilotGrpcAddr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer cancel()
-		fn(t, client)
-	})
-}
-
-func TestAdsVersioning(t *testing.T) {
-	node := sidecarID(app3Ip, "app3")
-
-	xdsv2Test(t, "version mismatch", func(t *testing.T, client AdsClientv2) {
-		// Send a v2 CDS request, expect v2 response
-		res := sendAndReceivev2(t, node, client, v2.ClusterType, "")
-		if res.TypeUrl != v2.ClusterType {
-			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
-		}
-
-		// Follow up with a v3 CDS request - this is an error. A client should be consistent
-		if err := sendXdsv2(node, client, v3.ClusterType, ""); err != nil {
-			t.Fatal(err)
-		}
-		res, err := adsReceivev2(client, 15*time.Second)
-		if err == nil {
-			t.Fatalf("expected an error because we sent a different version, got no error: %v", res)
-		}
-	})
-
-	xdsv2Test(t, "send v2", func(t *testing.T, client AdsClientv2) {
-		// Send v2 request, expect v2 response
-		res := sendAndReceivev2(t, node, client, v2.ClusterType, "")
-		if res.TypeUrl != v2.ClusterType {
-			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
-		}
-	})
-
-	xdsv2Test(t, "send v3", func(t *testing.T, client AdsClientv2) {
-		// Send v3 request, expect v3 response
-		res := sendAndReceivev2(t, node, client, v3.ClusterType, "")
-		if res.TypeUrl != v3.ClusterType {
-			t.Fatalf("expected type %v, got %v", v3.ClusterType, res.TypeUrl)
-		}
-	})
-
-	xdsTest(t, "send v2 with v3 transport", func(t *testing.T, client AdsClient) {
-		// Send v2 request, expect v2 response
-		res := sendAndReceive(t, node, client, v2.ClusterType, "")
-		if res.TypeUrl != v2.ClusterType {
-			t.Fatalf("expected type %v, got %v", v2.ClusterType, res.TypeUrl)
-		}
-	})
-
-	xdsTest(t, "send v3 with v3 transport", func(t *testing.T, client AdsClient) {
-		// Send v3 request, expect v3 response
-		res := sendAndReceive(t, node, client, v3.ClusterType, "")
-		if res.TypeUrl != v3.ClusterType {
-			t.Fatalf("expected type %v, got %v", v3.ClusterType, res.TypeUrl)
-		}
-	})
 }
 
 func TestAdsClusterUpdate(t *testing.T) {
@@ -359,12 +353,16 @@ func TestAdsClusterUpdate(t *testing.T) {
 	}
 	defer cancel()
 
+	version := ""
+	nonce := ""
 	var sendEDSReqAndVerify = func(clusterName string) {
-		err = sendEDSReq([]string{clusterName}, sidecarID("1.1.1.1", "app3"), edsstr)
+		err = sendEDSReq([]string{clusterName}, sidecarID("1.1.1.1", "app3"), version, nonce, edsstr)
 		if err != nil {
 			t.Fatal(err)
 		}
 		res, err := adsReceive(edsstr, 15*time.Second)
+		version = res.VersionInfo
+		nonce = res.Nonce
 		if err != nil {
 			t.Fatal("Recv failed", err)
 		}
@@ -387,7 +385,6 @@ func TestAdsClusterUpdate(t *testing.T) {
 
 	cluster1 := "outbound|80||local.default.svc.cluster.local"
 	sendEDSReqAndVerify(cluster1)
-
 	cluster2 := "outbound|80||hello.default.svc.cluster.local"
 	sendEDSReqAndVerify(cluster2)
 }
@@ -802,7 +799,7 @@ func TestAdsUpdate(t *testing.T) {
 	server.EnvoyXdsServer.MemRegistry.SetEndpoints("adsupdate.default.svc.cluster.local", "default",
 		newEndpointWithAccount("10.2.0.1", "hello-sa", "v1"))
 
-	err = sendEDSReq([]string{"outbound|2080||adsupdate.default.svc.cluster.local"}, sidecarID("1.1.1.1", "app3"), edsstr)
+	err = sendEDSReq([]string{"outbound|2080||adsupdate.default.svc.cluster.local"}, sidecarID("1.1.1.1", "app3"), "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +866,7 @@ func TestEnvoyRDSProtocolError(t *testing.T) {
 	}
 	defer cancel()
 
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, "", edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -887,17 +884,25 @@ func TestEnvoyRDSProtocolError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res == nil || len(res.Resources) != 2 {
+	if res == nil || len(res.Resources) != 1 {
 		t.Fatal("No routes returned")
 	}
 
-	// send a protocol error
-	err = sendRDSReq(gatewayID(gatewayIP), nil, res.Nonce, edsstr)
+	// send empty response and validate no routes are retuned.
+	err = sendRDSReq(gatewayID(gatewayIP), nil, res.VersionInfo, res.Nonce, edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
+	res, err = adsReceive(edsstr, 15*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || len(res.Resources) != 0 {
+		t.Fatalf("No routes expected but got routes %v", len(res.Resources))
+	}
+
 	// Refresh routes
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, "", edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,7 +927,7 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 	}
 	defer cancel()
 
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +964,7 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 	}
 
 	// Test update from A -> B
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeB}, "", edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeB}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,7 +981,7 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 	}
 
 	// Test update from B -> A, B
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.Nonce, edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA, routeB}, res.VersionInfo, res.Nonce, edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1013,7 @@ func TestEnvoyRDSUpdatedRouteRequest(t *testing.T) {
 
 	// Test update from B, B -> A
 
-	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", edsstr)
+	err = sendRDSReq(gatewayID(gatewayIP), []string{routeA}, "", "", edsstr)
 	if err != nil {
 		t.Fatal(err)
 	}

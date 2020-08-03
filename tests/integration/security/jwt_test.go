@@ -24,7 +24,6 @@ import (
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
-	"istio.io/istio/pkg/test/framework/components/ingress"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
 	"istio.io/istio/pkg/test/util/retry"
@@ -64,12 +63,12 @@ func TestRequestAuthentication(t *testing.T) {
 			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), jwtPolicies...)
 
 			var a, b, c, d, e echo.Instance
-			echoboot.NewBuilderOrFail(ctx, ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, p)).
-				With(&b, util.EchoConfig("b", ns, false, nil, p)).
-				With(&c, util.EchoConfig("c", ns, false, nil, p)).
-				With(&d, util.EchoConfig("d", ns, false, nil, p)).
-				With(&e, util.EchoConfig("e", ns, false, nil, p)).
+			echoboot.NewBuilder(ctx).
+				With(&a, util.EchoConfig("a", ns, false, nil)).
+				With(&b, util.EchoConfig("b", ns, false, nil)).
+				With(&c, util.EchoConfig("c", ns, false, nil)).
+				With(&d, util.EchoConfig("d", ns, false, nil)).
+				With(&e, util.EchoConfig("e", ns, false, nil)).
 				BuildOrFail(t)
 
 			testCases := []authn.TestCase{
@@ -275,13 +274,7 @@ func TestRequestAuthentication(t *testing.T) {
 func TestIngressRequestAuthentication(t *testing.T) {
 	framework.NewTest(t).
 		Run(func(ctx framework.TestContext) {
-			var ingr ingress.Instance
-			var err error
-			if ingr, err = ingress.New(ctx, ingress.Config{
-				Istio: ist,
-			}); err != nil {
-				t.Fatal(err)
-			}
+			ingr := ist.IngressFor(ctx.Clusters().Default())
 
 			ns := namespace.NewOrFail(t, ctx, namespace.Config{
 				Prefix: "req-authn-ingress",
@@ -307,9 +300,9 @@ func TestIngressRequestAuthentication(t *testing.T) {
 			defer ctx.Config().DeleteYAMLOrFail(t, ns.Name(), ingressCfgs...)
 
 			var a, b echo.Instance
-			echoboot.NewBuilderOrFail(ctx, ctx).
-				With(&a, util.EchoConfig("a", ns, false, nil, p)).
-				With(&b, util.EchoConfig("b", ns, false, nil, p)).
+			echoboot.NewBuilder(ctx).
+				With(&a, util.EchoConfig("a", ns, false, nil)).
+				With(&b, util.EchoConfig("b", ns, false, nil)).
 				BuildOrFail(t)
 
 			// These test cases verify in-mesh traffic doesn't need tokens.

@@ -28,15 +28,14 @@ import (
 	"testing"
 	"time"
 
+	"istio.io/istio/pkg/security"
 	"istio.io/istio/security/pkg/nodeagent/cache/mock"
-	"istio.io/istio/security/pkg/nodeagent/plugin"
 	"istio.io/pkg/filewatcher"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"istio.io/istio/security/pkg/nodeagent/model"
 	"istio.io/istio/security/pkg/nodeagent/secretfetcher"
 	nodeagentutil "istio.io/istio/security/pkg/nodeagent/util"
 
@@ -199,7 +198,7 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 	if err != nil {
 		t.Fatalf("Error creating Mock CA client: %v", err)
 	}
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 100 * time.Millisecond,
 		EvictionDuration: 0,
 	}
@@ -207,7 +206,7 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 	if isUsingPluginProvider {
 		// The mocked token exchanger server returns 3 errors before returning a valid response.
 		fakePlugin := mock.NewMockTokenExchangeServer(3)
-		opt.Plugins = []plugin.Plugin{fakePlugin}
+		opt.TokenExchangers = []security.TokenExchanger{fakePlugin}
 	}
 
 	fetcher := &secretfetcher.SecretFetcher{
@@ -218,8 +217,6 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 	defer func() {
 		sc.Close()
 	}()
-
-	checkBool(t, "opt.AlwaysValidTokenFlag default", opt.AlwaysValidTokenFlag, false)
 
 	conID := "proxy1-id"
 	ctx := context.Background()
@@ -232,8 +229,8 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 		t.Errorf("Got unexpected certificate chain #1. Got: %v, want: %v", string(got), string(want))
 	}
 
-	checkBool(t, "SecretExist", sc.SecretExist(conID, WorkloadKeyCertResourceName, "jwtToken1", gotSecret.Version), true)
-	checkBool(t, "SecretExist", sc.SecretExist(conID, WorkloadKeyCertResourceName, "nonexisttoken", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(conID, WorkloadKeyCertResourceName, "jwtToken1", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(conID, WorkloadKeyCertResourceName, "nonexisttoken", gotSecret.Version), false)
 
 	gotSecretRoot, err := sc.GenerateSecret(ctx, conID, RootCertReqResourceName, "jwtToken1")
 	if err != nil {
@@ -244,8 +241,8 @@ func testWorkloadAgentGenerateSecret(t *testing.T, isUsingPluginProvider bool) {
 		t.Errorf("Got unexpected root certificate. Got: %v\n want: %v", string(got), string(want))
 	}
 
-	checkBool(t, "SecretExist", sc.SecretExist(conID, RootCertReqResourceName, "jwtToken1", gotSecretRoot.Version), true)
-	checkBool(t, "SecretExist", sc.SecretExist(conID, RootCertReqResourceName, "nonexisttoken", gotSecretRoot.Version), false)
+	checkBool(t, sc.SecretExist(conID, RootCertReqResourceName, "jwtToken1", gotSecretRoot.Version), true)
+	checkBool(t, sc.SecretExist(conID, RootCertReqResourceName, "nonexisttoken", gotSecretRoot.Version), false)
 
 	if got, want := atomic.LoadUint64(&sc.rootCertChangedCount), uint64(0); got != want {
 		t.Errorf("Got unexpected rootCertChangedCount: Got: %v\n want: %v", got, want)
@@ -272,7 +269,7 @@ func TestWorkloadAgentRefreshSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating Mock CA client: %v", err)
 	}
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 100 * time.Millisecond,
 		EvictionDuration: 0,
 	}
@@ -336,7 +333,7 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 
 	type expectedSecret struct {
 		exist  bool
-		secret *model.SecretItem
+		secret *security.SecretItem
 	}
 
 	cases := []struct {
@@ -350,7 +347,7 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 			expectedSecrets: []expectedSecret{
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName:     k8sGenericSecretName,
 						CertificateChain: k8sCertChain,
 						ExpireTime:       k8sCertChainExpireTime,
@@ -359,7 +356,7 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 				},
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName: k8sGenericSecretName + "-cacert",
 						RootCert:     k8sCaCert,
 						ExpireTime:   k8sCaCertExpireTime,
@@ -373,7 +370,7 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 			expectedSecrets: []expectedSecret{
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName:     k8sTLSSecretName,
 						CertificateChain: k8sCertChain,
 						ExpireTime:       k8sCertChainExpireTime,
@@ -382,7 +379,7 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 				},
 				{
 					exist: false,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName: k8sTLSSecretName + "-cacert",
 					},
 				},
@@ -401,8 +398,8 @@ func TestGatewayAgentGenerateSecret(t *testing.T) {
 				if err := verifySecret(gotSecret, es.secret); err != nil {
 					t.Errorf("Secret verification failed: %v", err)
 				}
-				checkBool(t, "SecretExist", sc.SecretExist(c.connID, es.secret.ResourceName, "", gotSecret.Version), true)
-				checkBool(t, "SecretExist", sc.SecretExist(c.connID, "nonexistsecret", "", gotSecret.Version), false)
+				checkBool(t, sc.SecretExist(c.connID, es.secret.ResourceName, "", gotSecret.Version), true)
+				checkBool(t, sc.SecretExist(c.connID, "nonexistsecret", "", gotSecret.Version), false)
 			}
 			key := ConnKey{
 				ConnectionID: c.connID,
@@ -466,7 +463,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 
 	type expectedSecret struct {
 		exist  bool
-		secret *model.SecretItem
+		secret *security.SecretItem
 	}
 
 	cases := []struct {
@@ -480,7 +477,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 			connID:    connID1,
 			expectedFbSecret: expectedSecret{
 				exist: true,
-				secret: &model.SecretItem{
+				secret: &security.SecretItem{
 					ResourceName:     k8sGenericSecretName,
 					CertificateChain: k8sTLSFallbackSecretCertChain,
 					ExpireTime:       k8sTLSFallbackSecretCertChainExpireTime,
@@ -490,7 +487,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 			expectedSecrets: []expectedSecret{
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName:     k8sGenericSecretName,
 						CertificateChain: k8sCertChain,
 						ExpireTime:       k8sCertChainExpireTime,
@@ -499,7 +496,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 				},
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName: k8sGenericSecretName + "-cacert",
 						RootCert:     k8sCaCert,
 						ExpireTime:   k8sCaCertExpireTime,
@@ -512,7 +509,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 			connID:    connID2,
 			expectedFbSecret: expectedSecret{
 				exist: true,
-				secret: &model.SecretItem{
+				secret: &security.SecretItem{
 					ResourceName:     k8sTLSSecretName,
 					CertificateChain: k8sTLSFallbackSecretCertChain,
 					ExpireTime:       k8sTLSFallbackSecretCertChainExpireTime,
@@ -522,7 +519,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 			expectedSecrets: []expectedSecret{
 				{
 					exist: true,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName:     k8sTLSSecretName,
 						CertificateChain: k8sCertChain,
 						ExpireTime:       k8sCertChainExpireTime,
@@ -531,7 +528,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 				},
 				{
 					exist: false,
-					secret: &model.SecretItem{
+					secret: &security.SecretItem{
 						ResourceName: k8sTLSSecretName + "-cacert",
 					},
 				},
@@ -541,7 +538,7 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 
 	fetcher.AddSecret(k8sTestTLSFallbackSecret)
 	for _, c := range cases {
-		if sc.ShouldWaitForIngressGatewaySecret(c.connID, c.expectedFbSecret.secret.ResourceName, "", false) {
+		if sc.ShouldWaitForGatewaySecret(c.connID, c.expectedFbSecret.secret.ResourceName, "", false) {
 			t.Fatal("When fallback secret is enabled, node agent should not wait for gateway secret")
 		}
 		// Verify that fallback secret is returned
@@ -604,9 +601,9 @@ func TestGatewayAgentGenerateSecretUsingFallbackSecret(t *testing.T) {
 				}
 			}
 		}
-		// When secret is deleted, node agent should not wait for ingress gateway secret.
+		// When secret is deleted, node agent should not wait for gateway secret.
 		fetcher.DeleteSecret(c.addSecret)
-		if sc.ShouldWaitForIngressGatewaySecret(c.connID, c.expectedFbSecret.secret.ResourceName, "", false) {
+		if sc.ShouldWaitForGatewaySecret(c.connID, c.expectedFbSecret.secret.ResourceName, "", false) {
 			t.Fatal("When fallback secret is enabled, node agent should not wait for gateway secret")
 		}
 	}
@@ -646,7 +643,7 @@ func createSecretCache() *SecretCache {
 	fetcher.InitWithKubeClient(fake.NewSimpleClientset().CoreV1())
 	ch := make(chan struct{})
 	fetcher.Run(ch)
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 100 * time.Millisecond,
 		EvictionDuration: 0,
 	}
@@ -654,17 +651,17 @@ func createSecretCache() *SecretCache {
 }
 
 // Validate that file mounted certs do not wait for ingress secret.
-func TestShouldWaitForIngressGatewaySecretForFileMountedCerts(t *testing.T) {
+func TestShouldWaitForGatewaySecretForFileMountedCerts(t *testing.T) {
 	fetcher := &secretfetcher.SecretFetcher{
 		UseCaClient: false,
 	}
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 100 * time.Millisecond,
 		EvictionDuration: 0,
 	}
 	sc := NewSecretCache(fetcher, notifyCb, opt)
-	if sc.ShouldWaitForIngressGatewaySecret("", "", "", true) {
-		t.Fatalf("Expected not to wait for ingress gateway secret for file mounted certs, but got true")
+	if sc.ShouldWaitForGatewaySecret("", "", "", true) {
+		t.Fatalf("Expected not to wait for gateway secret for file mounted certs, but got true")
 	}
 }
 
@@ -684,32 +681,32 @@ func TestGatewayAgentDeleteSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), true)
 
 	gotSecret, err = sc.GenerateSecret(ctx, connID, k8sGenericSecretName+"-cacert", "")
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), true)
 
 	gotSecret, err = sc.GenerateSecret(ctx, connID, k8sTLSSecretName, "")
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sTLSSecretName, "", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(connID, k8sTLSSecretName, "", gotSecret.Version), true)
 
 	_, err = sc.GenerateSecret(ctx, connID, k8sTLSSecretName+"-cacert", "")
 	if err == nil {
 		t.Fatalf("Get unexpected secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sTLSSecretName+"-cacert", "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sTLSSecretName+"-cacert", "", gotSecret.Version), false)
 
 	sc.DeleteK8sSecret(k8sGenericSecretName)
 	sc.DeleteK8sSecret(k8sGenericSecretName + "-cacert")
 	sc.DeleteK8sSecret(k8sTLSSecretName)
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), false)
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), false)
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sTLSSecretName, "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sTLSSecretName, "", gotSecret.Version), false)
 }
 
 // TestGatewayAgentUpdateSecret verifies that ingress gateway agent updates secret cache correctly.
@@ -727,14 +724,14 @@ func TestGatewayAgentUpdateSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), true)
 	gotSecret, err = sc.GenerateSecret(ctx, connID, k8sGenericSecretName+"-cacert", "")
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), true)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), true)
 	newTime := gotSecret.CreatedTime.Add(time.Duration(10) * time.Second)
-	newK8sTestSecret := model.SecretItem{
+	newK8sTestSecret := security.SecretItem{
 		CertificateChain: []byte("new cert chain"),
 		PrivateKey:       []byte("new private key"),
 		RootCert:         []byte("new root cert"),
@@ -744,9 +741,9 @@ func TestGatewayAgentUpdateSecret(t *testing.T) {
 		Version:          newTime.String(),
 	}
 	sc.UpdateK8sSecret(k8sGenericSecretName, newK8sTestSecret)
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName, "", gotSecret.Version), false)
 	sc.UpdateK8sSecret(k8sGenericSecretName+"-cacert", newK8sTestSecret)
-	checkBool(t, "SecretExist", sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), false)
+	checkBool(t, sc.SecretExist(connID, k8sGenericSecretName+"-cacert", "", gotSecret.Version), false)
 }
 
 func TestConstructCSRHostName(t *testing.T) {
@@ -798,18 +795,10 @@ func TestConstructCSRHostName(t *testing.T) {
 	}
 }
 
-func checkBool(t *testing.T, name string, got bool, want bool) {
+func checkBool(t *testing.T, got bool, want bool) {
 	if got != want {
-		t.Errorf("%s: got: %v, want: %v", name, got, want)
+		t.Errorf("SecretExist: got: %v, want: %v", got, want)
 	}
-}
-
-func TestSetAlwaysValidTokenFlag(t *testing.T) {
-	sc := createSecretCache()
-	defer sc.Close()
-	sc.configOptions.AlwaysValidTokenFlag = true
-	secret := model.SecretItem{}
-	checkBool(t, "isTokenExpired", sc.isTokenExpired(&secret), false)
 }
 
 func TestRootCertificateExists(t *testing.T) {
@@ -870,7 +859,7 @@ func TestKeyCertificateExist(t *testing.T) {
 	}
 }
 
-func notifyCb(_ ConnKey, _ *model.SecretItem) error {
+func notifyCb(_ ConnKey, _ *security.SecretItem) error {
 	return nil
 }
 
@@ -881,9 +870,10 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error creating Mock CA client: %v", err)
 	}
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 200 * time.Millisecond,
 		EvictionDuration: 0,
+		UseTokenForCSR:   true,
 	}
 
 	fetcher := &secretfetcher.SecretFetcher{
@@ -897,7 +887,7 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	addedWatchProbe := func(_ string, _ bool) { wgAddedWatch.Done() }
 
 	var closed bool
-	notifyCallback := func(_ ConnKey, _ *model.SecretItem) error {
+	notifyCallback := func(_ ConnKey, _ *security.SecretItem) error {
 		if !closed {
 			notifyEvent.Done()
 		}
@@ -948,8 +938,8 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(conID, WorkloadKeyCertResourceName, "jwtToken1", gotSecret.Version), true)
-	expectedSecret := &model.SecretItem{
+	checkBool(t, sc.SecretExist(conID, WorkloadKeyCertResourceName, "jwtToken1", gotSecret.Version), true)
+	expectedSecret := &security.SecretItem{
 		ResourceName:     WorkloadKeyCertResourceName,
 		CertificateChain: certchain,
 		PrivateKey:       privateKey,
@@ -969,7 +959,7 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(conID, RootCertReqResourceName, "jwtToken1", gotSecretRoot.Version), true)
+	checkBool(t, sc.SecretExist(conID, RootCertReqResourceName, "jwtToken1", gotSecretRoot.Version), true)
 	if got, want := atomic.LoadUint64(&sc.rootCertChangedCount), uint64(0); got != want {
 		t.Errorf("rootCertChangedCount: got: %v, want: %v", got, want)
 	}
@@ -978,7 +968,7 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get the expiration time from the existing root file")
 	}
-	expectedSecret = &model.SecretItem{
+	expectedSecret = &security.SecretItem{
 		ResourceName: RootCertReqResourceName,
 		RootCert:     rootCert,
 		ExpireTime:   rootExpiration,
@@ -1013,7 +1003,7 @@ func TestWorkloadAgentGenerateSecretFromFile(t *testing.T) {
 func TestWorkloadAgentGenerateSecretFromFileOverSds(t *testing.T) {
 	fetcher := &secretfetcher.SecretFetcher{}
 
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 200 * time.Millisecond,
 		EvictionDuration: 0,
 	}
@@ -1024,7 +1014,7 @@ func TestWorkloadAgentGenerateSecretFromFileOverSds(t *testing.T) {
 
 	addedWatchProbe := func(_ string, _ bool) { wgAddedWatch.Done() }
 
-	notifyCallback := func(_ ConnKey, _ *model.SecretItem) error {
+	notifyCallback := func(_ ConnKey, _ *security.SecretItem) error {
 		if !closed {
 			notifyEvent.Done()
 		}
@@ -1071,8 +1061,8 @@ func TestWorkloadAgentGenerateSecretFromFileOverSds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(conID, resource, "jwtToken1", gotSecret.Version), true)
-	expectedSecret := &model.SecretItem{
+	checkBool(t, sc.SecretExist(conID, resource, "jwtToken1", gotSecret.Version), true)
+	expectedSecret := &security.SecretItem{
 		ResourceName:     resource,
 		CertificateChain: certchain,
 		PrivateKey:       privateKey,
@@ -1092,7 +1082,7 @@ func TestWorkloadAgentGenerateSecretFromFileOverSds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get secrets: %v", err)
 	}
-	checkBool(t, "SecretExist", sc.SecretExist(conID, rootResource, "jwtToken1", gotSecretRoot.Version), true)
+	checkBool(t, sc.SecretExist(conID, rootResource, "jwtToken1", gotSecretRoot.Version), true)
 	if got, want := atomic.LoadUint64(&sc.rootCertChangedCount), uint64(0); got != want {
 		t.Errorf("rootCertChangedCount: got: %v, want: %v", got, want)
 	}
@@ -1101,7 +1091,7 @@ func TestWorkloadAgentGenerateSecretFromFileOverSds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get the expiration time from the existing root file")
 	}
-	expectedSecret = &model.SecretItem{
+	expectedSecret = &security.SecretItem{
 		ResourceName: rootResource,
 		RootCert:     rootCert,
 		ExpireTime:   rootExpiration,
@@ -1139,11 +1129,10 @@ func TestWorkloadAgentGenerateSecretFromFileOverSdsWithBogusFiles(t *testing.T) 
 		totalTimeout = originalTimeout
 	}()
 
-	opt := Options{
+	opt := &security.Options{
 		RotationInterval: 1 * time.Millisecond,
 		EvictionDuration: 0,
 	}
-
 	sc := NewSecretCache(fetcher, notifyCb, opt)
 	defer func() {
 		sc.Close()
@@ -1188,7 +1177,7 @@ func TestWorkloadAgentGenerateSecretFromFileOverSdsWithBogusFiles(t *testing.T) 
 	}
 }
 
-func verifySecret(gotSecret *model.SecretItem, expectedSecret *model.SecretItem) error {
+func verifySecret(gotSecret *security.SecretItem, expectedSecret *security.SecretItem) error {
 	if expectedSecret.ResourceName != gotSecret.ResourceName {
 		return fmt.Errorf("resource name verification error: expected %s but got %s", expectedSecret.ResourceName,
 			gotSecret.ResourceName)
@@ -1204,7 +1193,7 @@ func verifySecret(gotSecret *model.SecretItem, expectedSecret *model.SecretItem)
 	return nil
 }
 
-func verifyRootCASecret(gotSecret *model.SecretItem, expectedSecret *model.SecretItem) error {
+func verifyRootCASecret(gotSecret *security.SecretItem, expectedSecret *security.SecretItem) error {
 	if expectedSecret.ResourceName != gotSecret.ResourceName {
 		return fmt.Errorf("resource name verification error: expected %s but got %s", expectedSecret.ResourceName,
 			gotSecret.ResourceName)
@@ -1224,35 +1213,35 @@ func TestShouldRotate(t *testing.T) {
 	now := time.Now()
 
 	testCases := map[string]struct {
-		secret       *model.SecretItem
+		secret       *security.SecretItem
 		sc           *SecretCache
 		shouldRotate bool
 	}{
 		"Not in grace period": {
-			secret: &model.SecretItem{
+			secret: &security.SecretItem{
 				ResourceName: "test1",
 				ExpireTime:   now.Add(time.Hour),
 				CreatedTime:  now.Add(-time.Hour),
 			},
-			sc:           &SecretCache{configOptions: Options{SecretRotationGracePeriodRatio: 0.4}},
+			sc:           &SecretCache{configOptions: &security.Options{SecretRotationGracePeriodRatio: 0.4}},
 			shouldRotate: false,
 		},
 		"In grace period": {
-			secret: &model.SecretItem{
+			secret: &security.SecretItem{
 				ResourceName: "test2",
 				ExpireTime:   now.Add(time.Hour),
 				CreatedTime:  now.Add(-time.Hour),
 			},
-			sc:           &SecretCache{configOptions: Options{SecretRotationGracePeriodRatio: 0.6}},
+			sc:           &SecretCache{configOptions: &security.Options{SecretRotationGracePeriodRatio: 0.6}},
 			shouldRotate: true,
 		},
 		"Passed the expiration": {
-			secret: &model.SecretItem{
+			secret: &security.SecretItem{
 				ResourceName: "test3",
 				ExpireTime:   now.Add(-time.Minute),
 				CreatedTime:  now.Add(-time.Hour),
 			},
-			sc:           &SecretCache{configOptions: Options{SecretRotationGracePeriodRatio: 0}},
+			sc:           &SecretCache{configOptions: &security.Options{SecretRotationGracePeriodRatio: 0}},
 			shouldRotate: true,
 		},
 	}

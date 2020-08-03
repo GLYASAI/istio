@@ -325,7 +325,7 @@ func TestApplyListenerPatches(t *testing.T) {
 						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
 							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
 								Name:      wellknown.HTTPConnectionManager,
-								SubFilter: &networking.EnvoyFilter_ListenerMatch_SubFilterMatch{Name: "envoy.fault"},
+								SubFilter: &networking.EnvoyFilter_ListenerMatch_SubFilterMatch{Name: "envoy.fault"}, // Use deprecated name for test.
 							},
 						},
 					},
@@ -334,7 +334,7 @@ func TestApplyListenerPatches(t *testing.T) {
 			Patch: &networking.EnvoyFilter_Patch{
 				Operation: networking.EnvoyFilter_Patch_MERGE,
 				Value: buildPatchStruct(`
-{"name": "envoy.fault",
+{"name": "envoy.filters.http.fault",
 "typed_config": {
         "@type": "type.googleapis.com/envoy.extensions.filters.http.fault.v3.HTTPFault",
         "downstreamNodes": ["foo"]
@@ -406,7 +406,7 @@ func TestApplyListenerPatches(t *testing.T) {
 			Patch: &networking.EnvoyFilter_Patch{
 				Operation: networking.EnvoyFilter_Patch_MERGE,
 				Value: buildPatchStruct(`
-{"name": "envoy.http_connection_manager",
+{"name": "envoy.filters.network.http_connection_manager",
  "typed_config": {
         "@type": "type.googleapis.com/envoy.config.filter.network.http_connection_manager.v2.HttpConnectionManager",
          "xffNumTrustedHops": "4"
@@ -426,7 +426,7 @@ func TestApplyListenerPatches(t *testing.T) {
 						PortNumber: 80,
 						FilterChain: &networking.EnvoyFilter_ListenerMatch_FilterChainMatch{
 							Filter: &networking.EnvoyFilter_ListenerMatch_FilterMatch{
-								Name: wellknown.HTTPConnectionManager,
+								Name: "envoy.http_connection_manager", // Use deprecated name for test.
 							},
 						},
 					},
@@ -435,7 +435,7 @@ func TestApplyListenerPatches(t *testing.T) {
 			Patch: &networking.EnvoyFilter_Patch{
 				Operation: networking.EnvoyFilter_Patch_MERGE,
 				Value: buildPatchStruct(`
-{"name": "envoy.http_connection_manager", 
+{"name": "envoy.filters.network.http_connection_manager", 
  "typed_config": {
         "@type": "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager",
          "mergeSlashes": true,
@@ -992,7 +992,7 @@ func BenchmarkTelemetryV2Filters(b *testing.B) {
 								AlwaysSetRequestIdInResponse: true,
 								HttpFilters: []*http_conn.HttpFilter{
 									{Name: "http-filter3"},
-									{Name: wellknown.Router},
+									{Name: "envoy.router"}, // Use deprecated name for test.
 									{Name: "http-filter2"},
 								},
 							}),
@@ -1003,28 +1003,24 @@ func BenchmarkTelemetryV2Filters(b *testing.B) {
 		},
 	}
 
-	path := filepath.Join(env.IstioSrc, "tests/integration/telemetry/stats/prometheus/testdata")
-	files, err := ioutil.ReadDir(path)
+	file, err := ioutil.ReadFile(filepath.Join(env.IstioSrc, "manifests/charts/istio-control/istio-discovery/files/gen-istio.yaml"))
 	if err != nil {
 		b.Fatalf("failed to read telemetry v2 Envoy Filters")
 	}
-	if len(files) != 2 {
-		// Cheap attempt to make sure someone notices this test exists if they make changes to the folder and break things.
-		b.Fatalf("Expected to find 2 EnvoyFilters for telemetry v2.")
-	}
 	var configPatches []*networking.EnvoyFilter_EnvoyConfigObjectPatch
-	for _, patchFile := range files {
-		f, err := ioutil.ReadFile(filepath.Join(path, patchFile.Name()))
-		if err != nil {
-			b.Fatalf("failed to read file %v", patchFile)
+
+	configs, _, err := crd.ParseInputs(string(file))
+	if err != nil {
+		b.Fatalf("failed to unmarshal EnvoyFilter: %v", err)
+	}
+	for _, c := range configs {
+		if c.GroupVersionKind != gvk.EnvoyFilter {
+			continue
 		}
-		configs, _, err := crd.ParseInputs(string(f))
-		if err != nil {
-			b.Fatalf("failed to unmarshal EnvoyFilter: %v", err)
-		}
-		for _, c := range configs {
-			configPatches = append(configPatches, c.Spec.(*networking.EnvoyFilter).ConfigPatches...)
-		}
+		configPatches = append(configPatches, c.Spec.(*networking.EnvoyFilter).ConfigPatches...)
+	}
+	if len(configPatches) == 0 {
+		b.Fatalf("found no patches, failed to read telemetry config?")
 	}
 
 	sidecarProxy := &model.Proxy{

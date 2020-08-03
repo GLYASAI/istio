@@ -1,3 +1,19 @@
+// Copyright Istio Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//  GENERATED FILE -- DO NOT EDIT
+
 package xds
 
 import (
@@ -164,6 +180,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/grpc_web/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/gzip/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_to_metadata/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/health_check/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ip_tagging/v3"
@@ -219,6 +236,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/internal_redirect/allow_listed_routes/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/internal_redirect/previous_routes/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/internal_redirect/safe_cross_scheme/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/network/socket_interface/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/host/omit_host_metadata/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/retry/priority/previous_priorities/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/datadog/v4alpha"
@@ -228,6 +246,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/xray/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/tracers/zipkin/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/alts/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/proxy_protocol/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/quic/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/raw_buffer/v3"
@@ -250,6 +269,7 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/endpoint/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/event_reporting/v2alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/event_reporting/v3"
+	_ "github.com/envoyproxy/go-control-plane/envoy/service/extension/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/health/v3"
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/health/v4alpha"
 	_ "github.com/envoyproxy/go-control-plane/envoy/service/listener/v3"
@@ -287,4 +307,9 @@ import (
 	_ "github.com/envoyproxy/go-control-plane/pkg/test/resource/v3"
 	_ "github.com/envoyproxy/go-control-plane/pkg/test/v2"
 	_ "github.com/envoyproxy/go-control-plane/pkg/test/v3"
+
+	// Istio-specific Envoy filters
+	_ "istio.io/istio/pkg/envoy/config/filter/http/alpn/v2alpha1"
+	_ "istio.io/istio/pkg/envoy/config/filter/http/authn/v2alpha1"
+	_ "istio.io/istio/pkg/envoy/config/filter/network/tcp_cluster_rewrite/v2alpha1"
 )

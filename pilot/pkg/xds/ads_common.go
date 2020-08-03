@@ -24,9 +24,6 @@ import (
 var configKindAffectedProxyTypes = map[resource.GroupVersionKind][]model.NodeType{
 	gvk.Gateway: {model.Router},
 	gvk.Sidecar: {model.SidecarProxy},
-
-	gvk.QuotaSpec:        {model.SidecarProxy},
-	gvk.QuotaSpecBinding: {model.SidecarProxy},
 }
 
 // ConfigAffectsProxy checks if a pushEv will affect a specified proxy. That means whether the push will be performed
@@ -38,30 +35,40 @@ func ConfigAffectsProxy(pushEv *Event, proxy *model.Proxy) bool {
 	}
 
 	for config := range pushEv.configsUpdated {
-		// If we've already know a specific configKind will affect some proxy types, check for that.
+		affected := true
+
+		// Some configKinds only affect specific proxy types
 		if kindAffectedTypes, f := configKindAffectedProxyTypes[config.Kind]; f {
+			affected = false
 			for _, t := range kindAffectedTypes {
 				if t == proxy.Type {
-					return true
+					affected = true
+					break
 				}
 			}
-			continue
 		}
 
-		// Detailed config dependencies check.
-		switch proxy.Type {
-		case model.SidecarProxy:
-			if proxy.SidecarScope.DependsOnConfig(config) {
-				return true
-			} else if proxy.PrevSidecarScope != nil && proxy.PrevSidecarScope.DependsOnConfig(config) {
-				return true
-			}
-		// TODO We'll add the check for other proxy types later.
-		default:
+		if affected && checkProxyDependencies(proxy, config) {
 			return true
 		}
 	}
 
+	return false
+}
+
+func checkProxyDependencies(proxy *model.Proxy, config model.ConfigKey) bool {
+	// Detailed config dependencies check.
+	switch proxy.Type {
+	case model.SidecarProxy:
+		if proxy.SidecarScope.DependsOnConfig(config) {
+			return true
+		} else if proxy.PrevSidecarScope != nil && proxy.PrevSidecarScope.DependsOnConfig(config) {
+			return true
+		}
+	default:
+		// TODO We'll add the check for other proxy types later.
+		return true
+	}
 	return false
 }
 
@@ -138,11 +145,6 @@ func PushTypeFor(proxy *model.Proxy, pushEv *Event) map[Type]bool {
 				out[EDS] = true
 				out[LDS] = true
 				out[RDS] = true
-			case gvk.QuotaSpec,
-				gvk.QuotaSpecBinding:
-				// LDS must be pushed, otherwise RDS is not reloaded
-				out[LDS] = true
-				out[RDS] = true
 			case gvk.AuthorizationPolicy,
 				gvk.RequestAuthentication:
 				out[LDS] = true
@@ -183,9 +185,7 @@ func PushTypeFor(proxy *model.Proxy, pushEv *Event) map[Type]bool {
 				out[EDS] = true
 				out[LDS] = true
 				out[RDS] = true
-			case gvk.Sidecar,
-				gvk.QuotaSpec,
-				gvk.QuotaSpecBinding:
+			case gvk.Sidecar:
 				// do not push for gateway
 			case gvk.AuthorizationPolicy,
 				gvk.RequestAuthentication:

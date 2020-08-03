@@ -126,6 +126,9 @@ type DiscoveryServer struct {
 
 	// InternalGen is notified of connect/disconnect/nack on all connections
 	InternalGen *InternalGen
+
+	// serverReady indicates caches have been synced up and server is ready to process requests.
+	serverReady bool
 }
 
 // EndpointShards holds the set of endpoint shards of a service. Registries update
@@ -161,6 +164,7 @@ func NewDiscoveryServer(env *model.Environment, plugins []string) *DiscoveryServ
 		DebugConfigs:            features.DebugConfigs,
 		debugHandlers:           map[string]string{},
 		adsClients:              map[string]*Connection{},
+		serverReady:             false,
 	}
 
 	if features.XDSAuth {
@@ -182,11 +186,25 @@ func NewDiscoveryServer(env *model.Environment, plugins []string) *DiscoveryServ
 	return out
 }
 
-// Register adds the ADS and EDS handles to the grpc server
+// Register adds the ADS handler to the grpc server
 func (s *DiscoveryServer) Register(rpcs *grpc.Server) {
-	// Register v2 and v3 servers
+	// Register v3 server
 	discovery.RegisterAggregatedDiscoveryServiceServer(rpcs, s)
+	// Register v2 server just for compatibility with gRPC. When gRPC v3 comes out, we can drop this
 	discoveryv2.RegisterAggregatedDiscoveryServiceServer(rpcs, s.createV2Adapter())
+}
+
+// CachesSynced is called when caches have been synced so that server can accept connections.
+func (s *DiscoveryServer) CachesSynced() {
+	s.updateMutex.Lock()
+	s.serverReady = true
+	s.updateMutex.Unlock()
+}
+
+func (s *DiscoveryServer) IsServerReady() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return s.serverReady
 }
 
 func (s *DiscoveryServer) Start(stopCh <-chan struct{}) {
@@ -211,7 +229,7 @@ func (s *DiscoveryServer) getNonK8sRegistries() []serviceregistry.Instance {
 	}
 
 	for _, registry := range registries {
-		if registry.Provider() != serviceregistry.Kubernetes || registry.Provider() != serviceregistry.External {
+		if registry.Provider() != serviceregistry.Kubernetes && registry.Provider() != serviceregistry.External {
 			nonK8sRegistries = append(nonK8sRegistries, registry)
 		}
 	}

@@ -71,7 +71,6 @@ spec:
 	cfg := echo.Config{
 		Namespace: ns,
 		Service:   name,
-		Pilot:     p,
 		Ports: []echo.Port{{
 			Name:         "http-8080",
 			Protocol:     protocol.HTTP,
@@ -88,7 +87,7 @@ spec:
 	if !rewrite {
 		cfg.ReadinessTimeout = time.Second * 15
 	}
-	err := echoboot.NewBuilderOrFail(t, ctx).
+	_, err := echoboot.NewBuilder(ctx).
 		With(&healthcheck, cfg).
 		Build()
 	gotSuccess := err == nil

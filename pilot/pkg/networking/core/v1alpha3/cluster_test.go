@@ -22,6 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
+
+	authn_model "istio.io/istio/pilot/pkg/security/model"
+
 	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
@@ -95,7 +100,7 @@ func TestHTTPCircuitBreakerThresholds(t *testing.T) {
 			testName = "override"
 		}
 		t.Run(testName, func(t *testing.T) {
-			g := NewGomegaWithT(t)
+			g := NewWithT(t)
 			clusters, err := buildTestClusters("*.example.org", 0, model.SidecarProxy, nil, testMesh,
 				&networking.DestinationRule{
 					Host: "*.example.org",
@@ -130,7 +135,7 @@ func TestHTTPCircuitBreakerThresholds(t *testing.T) {
 }
 
 func TestCommonHttpProtocolOptions(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	cases := []struct {
 		direction                  model.TrafficDirection
@@ -445,7 +450,7 @@ func buildTestClustersWithProxyMetadataWithIps(serviceHostname string, serviceRe
 }
 
 func TestBuildGatewayClustersWithRingHashLb(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	ttl := types.Duration{Nanos: 100}
 	clusters, err := buildTestClusters("*.example.org", 0, model.Router, nil, testMesh,
@@ -479,7 +484,7 @@ func TestBuildGatewayClustersWithRingHashLb(t *testing.T) {
 }
 
 func TestBuildGatewayClustersWithRingHashLbDefaultMinRingSize(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	ttl := types.Duration{Nanos: 100}
 	clusters, err := buildTestClusters("*.example.org", 0, model.Router, nil, testMesh,
@@ -536,7 +541,7 @@ func withClusterLocalHosts(m meshconfig.MeshConfig, hosts ...string) meshconfig.
 }
 
 func TestBuildSidecarClustersWithIstioMutualAndSNI(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	clusters, err := buildSniTestClustersForSidecar("foo.com")
 	g.Expect(err).NotTo(HaveOccurred())
@@ -562,7 +567,7 @@ func TestBuildClustersWithMutualTlsAndNodeMetadataCertfileOverrides(t *testing.T
 	expectedClientCertPath := "/clientCertFromNodeMetadata.pem"
 	expectedRootCertPath := "/clientRootCertFromNodeMetadata.pem"
 
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	envoyMetadata := &model.NodeMetadata{
 		TLSClientCertChain: expectedClientCertPath,
@@ -610,6 +615,12 @@ func TestBuildClustersWithMutualTlsAndNodeMetadataCertfileOverrides(t *testing.T
 		if strings.Contains(c.Name, "outbound") {
 			actualOutboundClusterCount++
 			tlsContext := getTLSContext(t, c)
+			if c.Name == "outbound|8080|foobar|foo.example.org" {
+				// per the docs: default values will be applied to fields omitted in port-level traffic policies rather than inheriting
+				// settings specified at the destination level
+				g.Expect(tlsContext).To(BeNil())
+				continue
+			}
 			g.Expect(tlsContext).NotTo(BeNil())
 
 			tlsCerts := tlsContext.CommonTlsContext.TlsCertificates
@@ -662,7 +673,7 @@ func buildSniTestClustersWithMetadata(sniValue string, typ model.NodeType, meta 
 }
 
 func TestBuildSidecarClustersWithMeshWideTCPKeepalive(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	// Do not set tcp_keepalive anywhere
 	clusters, err := buildTestClustersWithTCPKeepalive(None)
@@ -764,7 +775,7 @@ func buildTestClustersWithTCPKeepalive(configType ConfigType) ([]*cluster.Cluste
 }
 
 func TestClusterMetadata(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	destRule := &networking.DestinationRule{
 		Host: "*.example.org",
@@ -852,16 +863,17 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 		Sni:               "custom.foo.com",
 	}
 	tests := []struct {
-		name            string
-		tls             *networking.ClientTLSSettings
-		sans            []string
-		sni             string
-		proxy           *model.Proxy
-		autoMTLSEnabled bool
-		meshExternal    bool
-		serviceMTLSMode model.MutualTLSMode
-		want            *networking.ClientTLSSettings
-		wantCtxType     mtlsContextType
+		name                 string
+		tls                  *networking.ClientTLSSettings
+		sans                 []string
+		sni                  string
+		proxy                *model.Proxy
+		autoMTLSEnabled      bool
+		meshExternal         bool
+		serviceMTLSMode      model.MutualTLSMode
+		clusterDiscoveryType cluster.Cluster_DiscoveryType
+		want                 *networking.ClientTLSSettings
+		wantCtxType          mtlsContextType
 	}{
 		{
 			"Destination rule TLS sni and SAN override",
@@ -869,7 +881,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			false, false, model.MTLSUnknown,
+			false, false, model.MTLSUnknown, cluster.Cluster_EDS,
 			tlsSettings,
 			userSupplied,
 		},
@@ -886,7 +898,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			false, false, model.MTLSUnknown,
+			false, false, model.MTLSUnknown, cluster.Cluster_EDS,
 			&networking.ClientTLSSettings{
 				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
 				CaCertificates:    constants.DefaultRootCert,
@@ -907,7 +919,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 				TLSClientKey:       "/custom/key.pem",
 				TLSClientRootCert:  "/custom/root.pem",
 			}},
-			false, false, model.MTLSUnknown,
+			false, false, model.MTLSUnknown, cluster.Cluster_EDS,
 			&networking.ClientTLSSettings{
 				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
 				CaCertificates:    "/custom/root.pem",
@@ -924,7 +936,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			true, false, model.MTLSStrict,
+			true, false, model.MTLSStrict, cluster.Cluster_EDS,
 			&networking.ClientTLSSettings{
 				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
 				CaCertificates:    constants.DefaultRootCert,
@@ -941,7 +953,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			true, false, model.MTLSPermissive,
+			true, false, model.MTLSPermissive, cluster.Cluster_EDS,
 			&networking.ClientTLSSettings{
 				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
 				CaCertificates:    constants.DefaultRootCert,
@@ -958,7 +970,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			true, false, model.MTLSDisable,
+			true, false, model.MTLSDisable, cluster.Cluster_EDS,
 			nil,
 			userSupplied,
 		},
@@ -968,7 +980,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			true, false, model.MTLSUnknown,
+			true, false, model.MTLSUnknown, cluster.Cluster_EDS,
 			nil,
 			userSupplied,
 		},
@@ -978,7 +990,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			true, true, model.MTLSUnknown,
+			true, true, model.MTLSUnknown, cluster.Cluster_EDS,
 			nil,
 			userSupplied,
 		},
@@ -988,7 +1000,17 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 			[]string{"spiffe://foo/serviceaccount/1"},
 			"foo.com",
 			&model.Proxy{Metadata: &model.NodeMetadata{}},
-			false, false, model.MTLSDisable,
+			false, false, model.MTLSDisable, cluster.Cluster_EDS,
+			nil,
+			userSupplied,
+		},
+		{
+			"Do not enable auto mtls when cluster type is `Cluster_ORIGINAL_DST`",
+			nil,
+			[]string{"spiffe://foo/serviceaccount/1"},
+			"foo.com",
+			&model.Proxy{Metadata: &model.NodeMetadata{}},
+			true, false, model.MTLSPermissive, cluster.Cluster_ORIGINAL_DST,
 			nil,
 			userSupplied,
 		},
@@ -996,7 +1018,8 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotTLS, gotCtxType := conditionallyConvertToIstioMtls(tt.tls, tt.sans, tt.sni, tt.proxy, tt.autoMTLSEnabled, tt.meshExternal, tt.serviceMTLSMode)
+			gotTLS, gotCtxType := buildAutoMtlsSettings(tt.tls, tt.sans, tt.sni, tt.proxy,
+				tt.autoMTLSEnabled, tt.meshExternal, tt.serviceMTLSMode, tt.clusterDiscoveryType)
 			if !reflect.DeepEqual(gotTLS, tt.want) {
 				t.Errorf("cluster TLS does not match exppected result want %#v, got %#v", tt.want, gotTLS)
 			}
@@ -1008,7 +1031,7 @@ func TestConditionallyConvertToIstioMtls(t *testing.T) {
 }
 
 func TestDisablePanicThresholdAsDefault(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	outliers := []*networking.OutlierDetection{
 		// Unset MinHealthPercent
@@ -1035,7 +1058,7 @@ func TestDisablePanicThresholdAsDefault(t *testing.T) {
 }
 
 func TestApplyOutlierDetection(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	tests := []struct {
 		name string
@@ -1043,9 +1066,16 @@ func TestApplyOutlierDetection(t *testing.T) {
 		o    *cluster.OutlierDetection
 	}{
 		{
+			"Nil outlier detection",
+			nil,
+			nil,
+		},
+		{
 			"No outlier detection is set",
 			&networking.OutlierDetection{},
-			&cluster.OutlierDetection{},
+			&cluster.OutlierDetection{
+				EnforcingSuccessRate: &wrappers.UInt32Value{Value: 0},
+			},
 		},
 		{
 			"Consecutive gateway and 5xx errors are set",
@@ -1058,6 +1088,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 				EnforcingConsecutive_5Xx:           &wrappers.UInt32Value{Value: 100},
 				ConsecutiveGatewayFailure:          &wrappers.UInt32Value{Value: 3},
 				EnforcingConsecutiveGatewayFailure: &wrappers.UInt32Value{Value: 100},
+				EnforcingSuccessRate:               &wrappers.UInt32Value{Value: 0},
 			},
 		},
 		{
@@ -1068,6 +1099,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 			&cluster.OutlierDetection{
 				ConsecutiveGatewayFailure:          &wrappers.UInt32Value{Value: 3},
 				EnforcingConsecutiveGatewayFailure: &wrappers.UInt32Value{Value: 100},
+				EnforcingSuccessRate:               &wrappers.UInt32Value{Value: 0},
 			},
 		},
 		{
@@ -1078,6 +1110,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 			&cluster.OutlierDetection{
 				Consecutive_5Xx:          &wrappers.UInt32Value{Value: 3},
 				EnforcingConsecutive_5Xx: &wrappers.UInt32Value{Value: 100},
+				EnforcingSuccessRate:     &wrappers.UInt32Value{Value: 0},
 			},
 		},
 		{
@@ -1088,6 +1121,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 			&cluster.OutlierDetection{
 				ConsecutiveGatewayFailure:          &wrappers.UInt32Value{Value: 0},
 				EnforcingConsecutiveGatewayFailure: &wrappers.UInt32Value{Value: 0},
+				EnforcingSuccessRate:               &wrappers.UInt32Value{Value: 0},
 			},
 		},
 		{
@@ -1098,6 +1132,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 			&cluster.OutlierDetection{
 				Consecutive_5Xx:          &wrappers.UInt32Value{Value: 0},
 				EnforcingConsecutive_5Xx: &wrappers.UInt32Value{Value: 0},
+				EnforcingSuccessRate:     &wrappers.UInt32Value{Value: 0},
 			},
 		},
 	}
@@ -1119,7 +1154,7 @@ func TestApplyOutlierDetection(t *testing.T) {
 }
 
 func TestStatNamePattern(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	statConfigMesh := meshconfig.MeshConfig{
 		ConnectTimeout: &types.Duration{
@@ -1144,7 +1179,7 @@ func TestStatNamePattern(t *testing.T) {
 }
 
 func TestDuplicateClusters(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	clusters, err := buildTestClusters("*.example.org", model.DNSLB, model.SidecarProxy,
 		&core.Locality{}, testMesh,
@@ -1156,7 +1191,7 @@ func TestDuplicateClusters(t *testing.T) {
 }
 
 func TestSidecarLocalityLB(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 	// Distribute locality loadbalancing setting
 	testMesh.LocalityLbSetting = &networking.LocalityLoadBalancerSetting{
 		Distribute: []*networking.LocalityLoadBalancerSetting_Distribute{
@@ -1245,7 +1280,7 @@ func TestSidecarLocalityLB(t *testing.T) {
 }
 
 func TestLocalityLBDestinationRuleOverride(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 	// Distribute locality loadbalancing setting
 	testMesh.LocalityLbSetting = &networking.LocalityLoadBalancerSetting{
 		Distribute: []*networking.LocalityLoadBalancerSetting_Distribute{
@@ -1309,7 +1344,7 @@ func TestLocalityLBDestinationRuleOverride(t *testing.T) {
 }
 
 func TestGatewayLocalityLB(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 	// Distribute locality loadbalancing setting
 	testMesh.LocalityLbSetting = &networking.LocalityLoadBalancerSetting{
 		Distribute: []*networking.LocalityLoadBalancerSetting_Distribute{
@@ -1467,7 +1502,7 @@ func TestFindServiceInstanceForIngressListener(t *testing.T) {
 }
 
 func TestClusterDiscoveryTypeAndLbPolicyRoundRobin(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	clusters, err := buildTestClusters("*.example.org", model.Passthrough, model.SidecarProxy, nil, testMesh,
 		&networking.DestinationRule{
@@ -1487,7 +1522,7 @@ func TestClusterDiscoveryTypeAndLbPolicyRoundRobin(t *testing.T) {
 }
 
 func TestClusterDiscoveryTypeAndLbPolicyPassthrough(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	clusters, err := buildTestClusters("*.example.org", model.ClientSideLB, model.SidecarProxy, nil, testMesh,
 		&networking.DestinationRule{
@@ -1508,7 +1543,7 @@ func TestClusterDiscoveryTypeAndLbPolicyPassthrough(t *testing.T) {
 }
 
 func TestBuildClustersDefaultCircuitBreakerThresholds(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	configgen := NewConfigGenerator([]plugin.Plugin{})
 	serviceDiscovery := memregistry.NewServiceDiscovery(nil)
@@ -1531,7 +1566,7 @@ func TestBuildClustersDefaultCircuitBreakerThresholds(t *testing.T) {
 }
 
 func TestBuildInboundClustersDefaultCircuitBreakerThresholds(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	configgen := NewConfigGenerator([]plugin.Plugin{})
 	serviceDiscovery := memregistry.NewServiceDiscovery(nil)
@@ -1578,7 +1613,7 @@ func TestBuildInboundClustersDefaultCircuitBreakerThresholds(t *testing.T) {
 }
 
 func TestBuildInboundClustersPortLevelCircuitBreakerThresholds(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	proxy := &model.Proxy{
 		Metadata:     &model.NodeMetadata{},
@@ -1717,7 +1752,7 @@ func TestBuildInboundClustersPortLevelCircuitBreakerThresholds(t *testing.T) {
 }
 
 func TestRedisProtocolWithPassThroughResolutionAtGateway(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	configgen := NewConfigGenerator([]plugin.Plugin{})
 
@@ -1752,7 +1787,7 @@ func TestRedisProtocolWithPassThroughResolutionAtGateway(t *testing.T) {
 }
 
 func TestRedisProtocolClusterAtGateway(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	configgen := NewConfigGenerator([]plugin.Plugin{})
 
@@ -1796,8 +1831,55 @@ func TestRedisProtocolClusterAtGateway(t *testing.T) {
 	}
 }
 
+func TestAutoMTLSClusterSubsets(t *testing.T) {
+	g := NewWithT(t)
+
+	destRule := &networking.DestinationRule{
+		Host: TestServiceNHostname,
+		Subsets: []*networking.Subset{
+			{
+				Name: "foobar",
+				TrafficPolicy: &networking.TrafficPolicy{
+					ConnectionPool: &networking.ConnectionPoolSettings{
+						Http: &networking.ConnectionPoolSettings_HTTPSettings{
+							MaxRequestsPerConnection: 1,
+						},
+					},
+					PortLevelSettings: []*networking.TrafficPolicy_PortTrafficPolicy{
+						{
+							Port: &networking.PortSelector{
+								Number: 8080,
+							},
+							Tls: &networking.ClientTLSSettings{
+								Mode: networking.ClientTLSSettings_ISTIO_MUTUAL,
+								Sni:  "custom.sni.com",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testMesh.EnableAutoMtls.Value = true
+
+	clusters, err := buildTestClusters(TestServiceNHostname, 0, model.SidecarProxy, nil, testMesh, destRule)
+	g.Expect(err).NotTo(HaveOccurred())
+
+	tlsContext := getTLSContext(t, clusters[1])
+	g.Expect(tlsContext).ToNot(BeNil())
+	g.Expect(tlsContext.GetSni()).To(Equal("custom.sni.com"))
+	g.Expect(clusters[1].TransportSocketMatches).To(HaveLen(0))
+
+	for _, i := range []int{0, 2, 3} {
+		g.Expect(getTLSContext(t, clusters[i])).To(BeNil())
+		g.Expect(clusters[i].TransportSocketMatches).To(HaveLen(2))
+	}
+
+}
+
 func TestAutoMTLSClusterIgnoreWorkloadLevelPeerAuthn(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	destRule := &networking.DestinationRule{
 		Host: TestServiceNHostname,
@@ -2111,7 +2193,6 @@ func TestApplyUpstreamTLSSettings(t *testing.T) {
 		IstioVersion: &model.IstioVersion{Major: 1, Minor: 5},
 	}
 	push := model.NewPushContext()
-	push.Mesh = &meshconfig.MeshConfig{SdsUdsPath: "foo"}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2152,6 +2233,1292 @@ func TestApplyUpstreamTLSSettings(t *testing.T) {
 
 }
 
+type expectedResult struct {
+	tlsContext *tls.UpstreamTlsContext
+	err        error
+}
+
+// TestBuildUpstreamClusterTLSContext tests the buildUpstreamClusterTLSContext function
+func TestBuildUpstreamClusterTLSContext(t *testing.T) {
+
+	metadataClientCert := "/path/to/metadata/cert"
+	metadataRootCert := "/path/to/metadata/root-cert"
+	metadataClientKey := "/path/to/metadata/key"
+
+	clientCert := "/path/to/cert"
+	rootCert := "path/to/cacert"
+	clientKey := "/path/to/key"
+
+	credentialName := "some-fake-credential"
+
+	testCases := []struct {
+		name                  string
+		opts                  *buildClusterOpts
+		tls                   *networking.ClientTLSSettings
+		node                  *model.Proxy
+		certValidationContext *tls.CertificateValidationContext
+		result                expectedResult
+	}{
+		{
+			name: "tls mode disabled",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode: networking.ClientTLSSettings_DISABLE,
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result:                expectedResult{nil, nil},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, with no client certificate",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: "",
+				PrivateKey:        "some-fake-key",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				fmt.Errorf("client cert must be provided"),
+			},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, with no client key",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: "some-fake-cert",
+				PrivateKey:        "",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				fmt.Errorf("client key must be provided"),
+			},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, node metadata sdsEnabled false",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: rootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientKey,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNInMeshWithMxc,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, node metadata sdsEnabled false with Http2ProtocolOptions not nil",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name:                 "test-cluster",
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: rootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientKey,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNInMeshH2WithMxc,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, node metadata sdsEnabled false overridden metadata certs",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{
+						TLSClientCertChain: metadataClientCert,
+						TLSClientRootCert:  metadataRootCert,
+						TLSClientKey:       metadataClientKey,
+					},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: metadataRootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataRootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataClientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataClientKey,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNInMeshWithMxc,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode ISTIO_MUTUAL, with node metadata sdsEnabled true",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_ISTIO_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				SubjectAltNames:   []string{"SAN"},
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name: authn_model.SDSDefaultResourceName,
+								SdsConfig: &core.ConfigSource{
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType:             core.ApiConfigSource_GRPC,
+											TransportApiVersion: core.ApiVersion_V3,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+														EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+													},
+												},
+											},
+										},
+									},
+									ResourceApiVersion:  core.ApiVersion_V3,
+									InitialFetchTimeout: features.InitialFetchTimeout,
+								},
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"})},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: authn_model.SDSRootResourceName,
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+															EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNInMeshWithMxc,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with no certs specified in tls",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with certs specified in tls",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				CaCertificates:  rootCert,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"})},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: fmt.Sprintf("file-root:%s", rootCert),
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+															EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with certs specified in tls with h2",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name:                 "test-cluster",
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				CaCertificates:  rootCert,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"})},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: fmt.Sprintf("file-root:%s", rootCert),
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+															EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNH2Only,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with certs specified in tls with overridden metadata certs",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{
+						TLSClientRootCert: metadataRootCert,
+					},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				CaCertificates:  rootCert,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"})},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: fmt.Sprintf("file-root:%s", metadataRootCert),
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+															EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with no client certificate",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: "",
+				PrivateKey:        "some-fake-key",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				fmt.Errorf("client cert must be provided"),
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with no client key",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: "some-fake-cert",
+				PrivateKey:        "",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				fmt.Errorf("client key must be provided"),
+			},
+		},
+		{
+			name: "tls mode MUTUAL, node metadata sdsEnabled false",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				CaCertificates:    rootCert,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: rootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientKey,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, node metadata sdsEnabled false with H2",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name:                 "test-cluster",
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				CaCertificates:    rootCert,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: rootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: clientKey,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNH2Only,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, node metadata sdsEnabled false overridden metadata certs",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{
+						TLSClientCertChain: metadataClientCert,
+						TLSClientRootCert:  metadataRootCert,
+						TLSClientKey:       metadataClientKey,
+					},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				CaCertificates:    rootCert,
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: false,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: metadataRootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{
+							ValidationContext: &tls.CertificateValidationContext{
+								TrustedCa: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataRootCert,
+									},
+								},
+							},
+						},
+						TlsCertificates: []*tls.TlsCertificate{
+							{
+								CertificateChain: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataClientCert,
+									},
+								},
+								PrivateKey: &core.DataSource{
+									Specifier: &core.DataSource_Filename{
+										Filename: metadataClientKey,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with node metadata sdsEnabled true no root CA specified",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				SubjectAltNames:   []string{"SAN"},
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name: fmt.Sprintf("file-cert:%s~%s", clientCert, clientKey),
+								SdsConfig: &core.ConfigSource{
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType:             core.ApiConfigSource_GRPC,
+											TransportApiVersion: core.ApiVersion_V3,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+														EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+													},
+												},
+											},
+										},
+									},
+									ResourceApiVersion:  core.ApiVersion_V3,
+									InitialFetchTimeout: features.InitialFetchTimeout,
+								},
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_ValidationContext{},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with node metadata sdsEnabled true",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:              networking.ClientTLSSettings_MUTUAL,
+				ClientCertificate: clientCert,
+				PrivateKey:        clientKey,
+				CaCertificates:    rootCert,
+				SubjectAltNames:   []string{"SAN"},
+				Sni:               "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{
+				TrustedCa: &core.DataSource{
+					Specifier: &core.DataSource_Filename{
+						Filename: rootCert,
+					},
+				},
+			},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name: fmt.Sprintf("file-cert:%s~%s", clientCert, clientKey),
+								SdsConfig: &core.ConfigSource{
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType:             core.ApiConfigSource_GRPC,
+											TransportApiVersion: core.ApiVersion_V3,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+														EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+													},
+												},
+											},
+										},
+									},
+									ResourceApiVersion:  core.ApiVersion_V3,
+									InitialFetchTimeout: features.InitialFetchTimeout,
+								},
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"})},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: fmt.Sprintf("file-root:%s", rootCert),
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+															EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with CredentialName specified",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.Router,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_SIMPLE,
+				CredentialName:  credentialName,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{
+									MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"}),
+								},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+															GoogleGrpc: &core.GrpcService_GoogleGrpc{
+																TargetUri:  authn_model.GatewaySdsUdsPath,
+																StatPrefix: authn_model.SDSStatPrefix,
+															},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, with CredentialName specified with h2 and no SAN",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name:                 "test-cluster",
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.Router,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:           networking.ClientTLSSettings_SIMPLE,
+				CredentialName: credentialName,
+				Sni:            "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+															GoogleGrpc: &core.GrpcService_GoogleGrpc{
+																TargetUri:  authn_model.GatewaySdsUdsPath,
+																StatPrefix: authn_model.SDSStatPrefix,
+															},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNH2Only,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with CredentialName specified",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.Router,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:            networking.ClientTLSSettings_MUTUAL,
+				CredentialName:  credentialName,
+				SubjectAltNames: []string{"SAN"},
+				Sni:             "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name: credentialName,
+								SdsConfig: &core.ConfigSource{
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType:             core.ApiConfigSource_GRPC,
+											TransportApiVersion: core.ApiVersion_V3,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+														GoogleGrpc: &core.GrpcService_GoogleGrpc{
+															TargetUri:  authn_model.GatewaySdsUdsPath,
+															StatPrefix: authn_model.SDSStatPrefix,
+														},
+													},
+												},
+											},
+										},
+									},
+									ResourceApiVersion:  core.ApiVersion_V3,
+									InitialFetchTimeout: features.InitialFetchTimeout,
+								},
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{
+									MatchSubjectAltNames: util.StringToExactMatch([]string{"SAN"}),
+								},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+															GoogleGrpc: &core.GrpcService_GoogleGrpc{
+																TargetUri:  authn_model.GatewaySdsUdsPath,
+																StatPrefix: authn_model.SDSStatPrefix,
+															},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, with CredentialName specified with h2 and no SAN",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name:                 "test-cluster",
+					Http2ProtocolOptions: &core.Http2ProtocolOptions{},
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.Router,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:           networking.ClientTLSSettings_MUTUAL,
+				CredentialName: credentialName,
+				Sni:            "some-sni.com",
+			},
+			node: &model.Proxy{
+				Metadata: &model.NodeMetadata{
+					SdsEnabled: true,
+				},
+			},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				tlsContext: &tls.UpstreamTlsContext{
+					CommonTlsContext: &tls.CommonTlsContext{
+						TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
+							{
+								Name: credentialName,
+								SdsConfig: &core.ConfigSource{
+									ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+										ApiConfigSource: &core.ApiConfigSource{
+											ApiType:             core.ApiConfigSource_GRPC,
+											TransportApiVersion: core.ApiVersion_V3,
+											GrpcServices: []*core.GrpcService{
+												{
+													TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+														GoogleGrpc: &core.GrpcService_GoogleGrpc{
+															TargetUri:  authn_model.GatewaySdsUdsPath,
+															StatPrefix: authn_model.SDSStatPrefix,
+														},
+													},
+												},
+											},
+										},
+									},
+									ResourceApiVersion:  core.ApiVersion_V3,
+									InitialFetchTimeout: features.InitialFetchTimeout,
+								},
+							},
+						},
+						ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+							CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+								DefaultValidationContext: &tls.CertificateValidationContext{},
+								ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+									Name: credentialName + authn_model.SdsCaSuffix,
+									SdsConfig: &core.ConfigSource{
+										ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+											ApiConfigSource: &core.ApiConfigSource{
+												ApiType:             core.ApiConfigSource_GRPC,
+												TransportApiVersion: core.ApiVersion_V3,
+												GrpcServices: []*core.GrpcService{
+													{
+														TargetSpecifier: &core.GrpcService_GoogleGrpc_{
+															GoogleGrpc: &core.GrpcService_GoogleGrpc{
+																TargetUri:  authn_model.GatewaySdsUdsPath,
+																StatPrefix: authn_model.SDSStatPrefix,
+															},
+														},
+													},
+												},
+											},
+										},
+										ResourceApiVersion:  core.ApiVersion_V3,
+										InitialFetchTimeout: features.InitialFetchTimeout,
+									},
+								},
+							},
+						},
+						AlpnProtocols: util.ALPNH2Only,
+					},
+					Sni: "some-sni.com",
+				},
+				err: nil,
+			},
+		},
+		{
+			name: "tls mode MUTUAL, credentialName is set with proxy type Sidecar",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.SidecarProxy,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:           networking.ClientTLSSettings_MUTUAL,
+				CredentialName: "fake-cred",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				nil,
+			},
+		},
+		{
+			name: "tls mode SIMPLE, credentialName is set with proxy type Sidecar",
+			opts: &buildClusterOpts{
+				cluster: &cluster.Cluster{
+					Name: "test-cluster",
+				},
+				proxy: &model.Proxy{
+					Metadata: &model.NodeMetadata{},
+					Type:     model.SidecarProxy,
+				},
+			},
+			tls: &networking.ClientTLSSettings{
+				Mode:           networking.ClientTLSSettings_SIMPLE,
+				CredentialName: "fake-cred",
+			},
+			node:                  &model.Proxy{},
+			certValidationContext: &tls.CertificateValidationContext{},
+			result: expectedResult{
+				nil,
+				nil,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ret, err := buildUpstreamClusterTLSContext(tc.opts, tc.tls, tc.node, tc.certValidationContext)
+			if err != nil && tc.result.err == nil || err == nil && tc.result.err != nil {
+				t.Errorf("expecting:\n err=%v but got err=%v", tc.result.err, err)
+			} else if diff := cmp.Diff(tc.result.tlsContext, ret, protocmp.Transform()); diff != "" {
+				t.Errorf("got diff: `%v", diff)
+			}
+		})
+	}
+}
+
 // Helper function to extract TLS context from a cluster
 func getTLSContext(t *testing.T, c *cluster.Cluster) *tls.UpstreamTlsContext {
 	t.Helper()
@@ -2168,7 +3535,7 @@ func getTLSContext(t *testing.T, c *cluster.Cluster) *tls.UpstreamTlsContext {
 }
 
 func TestBuildStaticClusterWithNoEndPoint(t *testing.T) {
-	g := NewGomegaWithT(t)
+	g := NewWithT(t)
 
 	cfg := NewConfigGenerator([]plugin.Plugin{})
 	service := &model.Service{
